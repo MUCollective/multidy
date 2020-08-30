@@ -48,17 +48,21 @@ M = multiverse()
 
 First, we load the data and change some variable names.
 
-```{r, data}
+```{multiverse, data, inside = M}
 # data("vis_correlation_all_judgments")
 load("../data/vis_correlation_all_judgments.rda")
 
 # rename correlation manipulations, and define difference (dr) between target correlation (r) and manipulated correlation (mr)
 df <- vis_correlation_all_judgments %>%
+  unite("visandsign", vis:rdirection) %>%
   rename(
     r = rbase,
     mr = rv
   ) %>%
-  mutate(dr = abs(mr - r))
+  mutate(
+    dr = abs(mr - r),
+    participant = as.factor(participant)
+  )
 ```
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
@@ -74,17 +78,16 @@ jnd_from_logistic <- function(intercept, slope) {
 }
 ```
 
-
-```{multiverse, label = jnds, inside = M}
+```{multiverse, jnds, inside = M}
 # operationalize just-noticeable differences (jnd)
 df <- branch(operationalize_jnd,
   "avg_of_last_24_trials" ~  df %>%
     group_by(participant, r, approach) %>%
     filter(index > (max(index) - 24)) %>%
-    mutate(jnd = (mean(dr)) %>%
+    mutate(jnd = mean(dr)) %>%
     ungroup() %>%
     dplyr::select(-index),
-  "individual_curve_fits" ~ df %>%
+  "individual_curves" ~ df %>%
     group_by(participant, r, approach) %>%
     summarise(
       dr = list(dr),
@@ -98,7 +101,7 @@ df <- branch(operationalize_jnd,
     ) %>%
     unnest(cols = c(dr, correct)) %>%
     ungroup(),
-  "hierarchical_curve_fits" ~ df # derive jnds after model fitting
+  "hierarchical" ~ df # derive jnds after model fitting
     )
 ```
   
@@ -107,20 +110,20 @@ Here, we create and apply a logical index for exclusion criteria. This includes 
  2. Do we handle non-normality by excluding ourliers (as in Harrison et al.) or by log-transforming our JNDs later on (as in Kay and Heer)?
 Note that some analysis paths do not exclude any data, but we create an index for these cases nonetheless to maintain similar code across analysis paths.
 
-```{multiverse label = exclusions, inside = M}
+```{multiverse, exclusions, inside = M}
 # calculate values used to derive filtering conditions used in original paper
 df <- df %>%
   group_by(visandsign) %>%
   mutate(
     p_chance_cutoff = branch(handle_performance_at_chance,
-      "exclude" ~ p_chance_cutoff = mean(jnd > .45) > 0.2, # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
+      "exclude" ~ mean(jnd > .45) > 0.2, # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
       "censor" ~ FALSE # don't exclude any data, censor instead
     )
   ) %>%
   group_by(visandsign, r, approach) %>%
   mutate(
     mad_cutoff = branch(handle_non_normality,
-      "exclude" ~ abs(jnd - median(jnd)) > 3 * mad(jnd) # exclude observations > 3 median-absolute deviations from the median within each group
+      "exclude" ~ abs(jnd - median(jnd)) > 3 * mad(jnd), # exclude observations > 3 median-absolute deviations from the median within each group
       "log-transform" ~ FALSE # don't exclude any data, log transform instead
     )
   ) %>%
@@ -131,10 +134,10 @@ df <- df %>%
 ```
 
 Next, we make a decision about how we code the direction of approach for the staircase. We will use this to correct for bias later.
- - In the original study by Harrison et al., they define an adjusted correlation value (r_A) to use in their model, as in [Rensink and Baldrigde (2010)](https://onlinelibrary.wiley.com/doi/epdf/10.1111/j.1467-8659.2009.01694.x).
+ - In the original study by Harrison et al., they define an adjusted correlation value to use in their model, as in [Rensink and Baldrigde (2010)](https://onlinelibrary.wiley.com/doi/epdf/10.1111/j.1467-8659.2009.01694.x).
  - In Kay and Heer's reanalysis, they code approach as sum-to-zero so that other coefficients can be interpreted as relative to the mean of both approaches. They make a numeric version of the approach coded as sum-to-zero (this is easier to work with than the factor in many cases, for example if we want a model we can make predictions from with approach = 0). In one of our analysis paths, we will use these dummy codes to correct for bias in JND estimates due to the direction of the staircase approach in some analysis paths.
 
-```{multiverse label = adjust-approach, inside = M}
+```{multiverse, adjust-approach, inside = M}
 df <- branch(adjust_for_approach_bias,
   "adjusted-correlation" ~ df %>%
     group_by(visandsign, r, approach) %>%
@@ -142,18 +145,18 @@ df <- branch(adjust_for_approach_bias,
     group_by(visandsign, r) %>%
     mutate(
       mean_jnd_within_r = mean(mean_jnd_per_approach),
-      r_A = r + ifelse(approach == "above", 0.5, -0.5) * mean_jnd_within_r
-    ) %>% ungroup()
+      r = r + ifelse(approach == "above", 0.5, -0.5) * mean_jnd_within_r # adjusted correlations
+    ) %>% ungroup(),
   "approach-as-covariate" ~ df %>%
     mutate(
       approach_value = if_else(approach == "above", -1, 1)
     )
-
+)
 ```
 
 In their reanalysis, Kay and Heer censor JNDs to reflect the limits that the data collection procedure places on possble values of JNDs that can be derived. This is basically an alternative to excluding JNDs so large that they reflect performance at or worse than chance. We include both alternatives in our multiverse analysis.
 
-```{multiverse label = censoring, inside = M}
+```{multiverse, censoring, inside = M}
 df <- branch(handle_performance_at_chance,
         "exclude" ~ df,
         "censor" ~ df %>% 
@@ -162,7 +165,7 @@ df <- branch(handle_performance_at_chance,
                                          pmin(r - .05, .4), 
                                          pmin(.95 - r, .4)),
             censored = jnd > censoring_threshold,
-            censored_jnd = pmin(jnd, censoring_threshold)
+            jnd = Surv(pmin(jnd, censoring_threshold), !censored) # censored JNDs
           )
 )
 ```
@@ -171,299 +174,94 @@ Now, we are ready to model our data. Multiple decisions impact the implementatio
 
 The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification. For random effects models, we'll need to calculate approximate degrees of freedom as the number of participants minus the number of visualization conditions we want estimates for.
 
-```{multiverse label = modeling, inside = M}
-# degrees of freedom
-degrees_freedom <- length(unique(df$participant)) - length(unique(df$visandsign))
-
-m <- branch(operationalize_jnd,
-  "avg_of_last_24_trials" ~ # same inferential model as deriving from individual curve fits
-    branch(handle_non_normality,
-      "exlude" ~ # linear models
-        branch(handle_performance_at_chance,
-            "exclude" ~ # non-censored models,
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                    "no" ~ gamlss(jnd ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                    "no" ~ gamlss(jnd ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                  )
-              )
-            "censor" ~ # censored models
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                  )
-              )
-        )
-      "log-transform" ~ # log-linear models
-        branch(handle_performance_at_chance,
-            "exclude" ~ # non-censored models,
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                    "no" ~ gamlss(jnd ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                    "no" ~ gamlss(jnd ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                  )
-              )
-            "censor" ~ # censored models
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                  )
-              )
-        )
+```{multiverse, modeling, inside = M}
+m <- branch(random_effects,
+  "yes" %when% {operationalize_jnd != "hierarchical"} ~ 
+    gamlss(jnd ~ r * visandsign 
+        * branch(adjust_for_approach_bias,
+            "adjusted-correlation" ~ NULL,
+            "approach-as-covariate" ~ approach_value
+          )
+        + random(participant),
+      sigma.formula = ~ visandsign,
+      data = df,
+      family = branch(handle_performance_at_chance,
+        "exclude" ~ # non-censored models
+          branch(handle_non_normality,
+            "exclude" ~ NO, # linear models
+            "log-transform" ~ LOGNO # log-linear models
+          ),
+        "censor" ~ # censored models
+          branch(handle_non_normality,
+            "exclude" ~ cens(NO), # linear models
+            "log-transform" ~ cens(LOGNO) # log-linear models
+          )
+      )
     ),
-  "individual_curve_fits" ~ # same inferential model as deriving from avg of last 24 trials
-        branch(handle_non_normality,
-      "exlude" ~ # linear models
-        branch(handle_performance_at_chance,
-            "exclude" ~ # non-censored models,
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                    "no" ~ gamlss(jnd ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                    "no" ~ gamlss(jnd ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df
-                      )
-                  )
-              )
-            "censor" ~ # censored models
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(NO)
-                      )
-                  )
-              )
-        )
-      "log-transform" ~ # log-linear models
-        branch(handle_performance_at_chance,
-            "exclude" ~ # non-censored models,
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                    "no" ~ gamlss(jnd ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(jnd ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                    "no" ~ gamlss(jnd ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = LOGNO
-                      )
-                  )
-              )
-            "censor" ~ # censored models
-              branch(adjust_for_approach_bias,
-                "adjusted-correlation" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r_A * visandsign,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                  )
-                "approach-as-covariate" ~
-                  branch(random_efects,
-                    "yes" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value + ra(participant, df = degrees_freedom),
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                    "no" ~ gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value,
-                        sigma.formula = ~ visandsign,
-                        data = df,
-                        family = cens(LOGNO)
-                      )
-                  )
-              )
-        )
+  "no" %when% {operationalize_jnd != "hierarchical"} ~ 
+    gamlss(jnd ~ r * visandsign
+        * branch(adjust_for_approach_bias,
+            "adjusted-correlation" ~ NULL,
+            "approach-as-covariate" ~ approach_value
+          ),
+      sigma.formula = ~ visandsign,
+      data = df,
+      family = branch(handle_performance_at_chance,
+        "exclude" ~ # non-censored models
+          branch(handle_non_normality,
+            "exclude" ~ NO, # linear models
+            "log-transform" ~ LOGNO # log-linear models
+          ),
+        "censor" ~ # censored models
+          branch(handle_non_normality,
+            "exclude" ~ cens(NO), # linear models
+            "log-transform" ~ cens(LOGNO) # log-linear models
+          )
+      )
     ),
-  "hierarchical_curve_fits" ~ # fit one hierarchical logistic regression, and derive JNDs afterwards
-    branch(adjust_for_approach_bias,
-      "adjusted-correlation" ~
-        branch(random_efects,
-          "yes" ~ gamlss(correct ~ r_A * log(dr) * visandsign + ra(participant, df = degrees_freedom),
-              sigma.formula = ~ visandsign,
-              data = df,
-              family = BI
-            )
-          "no" ~ gamlss(correct ~ r_A * log(dr) * visandsign,
-              sigma.formula = ~ visandsign,
-              data = df,
-              family = BI
-            )
-        )
-      "approach-as-covariate" ~
-        branch(random_efects,
-          "yes" ~ gamlss(correct ~ r * log(dr) * visandsign * approach_value + ra(participant, df = degrees_freedom),
-              sigma.formula = ~ visandsign,
-              data = df,
-              family = BI
-            )
-          "no" ~ gamlss(correct ~ r * log(dr) * visandsign * approach_value,
-              sigma.formula = ~ visandsign,
-              data = df,
-              family = BI
-            )
-        )
+  "hierarchical" %when% operationalize_jnd == "hierarchical" ~ # logistic regression and derive JNDs after 
+    gamlss(correct ~ r * log(dr) * visandsign 
+        * branch(adjust_for_approach_bias,
+            "adjusted-correlation" ~ NULL,
+            "approach-as-covariate" ~ approach_value
+          )
+        + random(participant),
+      sigma.formula = ~ visandsign,
+      data = df,
+      family = BI
     )
 )
+```
+
+```{r}
+execute_multiverse(M)
+# expand(M)$.code[[1]]
+```
+
+```{r}
+rm(m)
+
+expand(M)$.results[[1]]$m
+```
 
 
-# m.linear = gamlss(jnd ~ r_A * visandsign,
-#     sigma.formula = ~ visandsign,
-#     data = df
-#   )
-# 
-# m.loglinear = gamlss(jnd ~ r * visandsign * approach,
-#     sigma.formula = ~ visandsign,
-#     data = df,
-#     family = LOGNO
-#   )
-# 
-# m.censored = gamlss(Surv(censored_jnd, !censored) ~ r * visandsign * approach_value,
-#     sigma.formula = ~ visandsign,
-#     data=df,
-#     family=cens(LOGNO)
-#   )
+```{r}
+saveRDS(M, file = "ranking-correlation.rds")
+# readRDS("ranking-correlation.rds")
+```
+
+## Visualize Results
+
+```{r}
+results <- extract_variables(M, m)
+```
+
+```{r}
+m <- gamlss(jnd ~ r * visandsign * NULL + random(participant), 
+        sigma.formula = ~visandsign, data = df, family = LOGNO)
+```
+
+
+```{r, run}
+execute_multiverse(M)
 ```
