@@ -6,13 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-# library(Cairo)          # nicer PNG rendering
-# library(car)            # powerTransform
 library(ggplot2)        # ggplot, stat_..., geom_..., etc
-# library(directlabels)   # geom_dl
-# library(scales)         # trans_format
-# library(grid)
-# library(gtable)
 library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
@@ -20,11 +14,6 @@ library(tidyr)          # unnest
 library(survival)       # Surv
 library(gamlss)
 library(gamlss.cens)    # cens
-# library(pander)
-# library(stringr)        # str_sub
-# library(runjags)
-# library(coda)
-# library(brms)
 library(ggdist)
 library(multiverse)
 
