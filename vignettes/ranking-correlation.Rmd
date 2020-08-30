@@ -13,7 +13,6 @@ library(ggplot2)        # ggplot, stat_..., geom_..., etc
 # library(scales)         # trans_format
 # library(grid)
 # library(gtable)
-library(plyr)           # ldply
 library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
@@ -49,22 +48,7 @@ M = multiverse()
 
 First, we load the data and change some variable names.
 
-```{r}
-inside(M, {
-  load("../data/vis_correlation_all_judgments.rda")
-
-# rename correlation manipulations, and define difference (dr) between target correlation (r) and manipulated correlation (mr)
-df <- vis_correlation_all_judgments %>%
-  rename(
-    r = rbase,
-    mr = rv
-  ) %>%
-  mutate(dr = abs(mr - r))
-})
-```
-
-
-```{multiverse label = data, inside = M}
+```{r, data}
 # data("vis_correlation_all_judgments")
 load("../data/vis_correlation_all_judgments.rda")
 
@@ -91,7 +75,7 @@ jnd_from_logistic <- function(intercept, slope) {
 ```
 
 
-```{multiverse label = jnds, inside = M}
+```{multiverse, label = jnds, inside = M}
 # operationalize just-noticeable differences (jnd)
 df <- branch(operationalize_jnd,
   "avg_of_last_24_trials" ~  df %>%
@@ -99,7 +83,7 @@ df <- branch(operationalize_jnd,
     filter(index > (max(index) - 24)) %>%
     mutate(jnd = (mean(dr)) %>%
     ungroup() %>%
-    dplyr::select(-index)
+    dplyr::select(-index),
   "individual_curve_fits" ~ df %>%
     group_by(participant, r, approach) %>%
     summarise(
@@ -115,6 +99,7 @@ df <- branch(operationalize_jnd,
     unnest(cols = c(dr, correct)) %>%
     ungroup(),
   "hierarchical_curve_fits" ~ df # derive jnds after model fitting
+    )
 ```
   
 Here, we create and apply a logical index for exclusion criteria. This includes two decision points: 
