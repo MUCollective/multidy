@@ -11,9 +11,9 @@ library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
 library(tidyr)          # unnest
-library(survival)       # Surv
+# library(survival)       # Surv
 library(gamlss)
-library(gamlss.cens)    # cens
+# library(gamlss.cens)    # cens
 library(tidybayes)
 library(multiverse)
 
@@ -118,21 +118,16 @@ df <- branch(operationalize_jnd,
 )
 ```
   
-Here, we create and apply a logical index for exclusion criteria. This includes two decision points: 
- 1. Do we handle chance performance by excluding entire `visandsign` conditions where there are too many staircases with performance worse than chance (as in Harrison et al.), or do we not exclude any data but censor our JNDs later on (as in Kay and Heer)?
- 2. Do we handle non-normality by excluding outliers (as in Harrison et al.) or by log-transforming our JNDs later on (as in Kay and Heer)?
-Note that some analysis paths do not exclude any data, but we create an index for these cases nonetheless to maintain similar code across analysis paths.
+Here, we create and apply a logical index for exclusion criteria. First, we handle chance performance by excluding entire `visandsign` conditions where there are too many staircases with performance worse than chance (as in Harrison et al.). Kay and Heer addressed this issue by censoring the data, but we were not able to get censored models to converge for our analysis. Thus, we leave this decision out.
+
+Second, we make a decision about how to handle the fact that JNDs are not normally distributed. Do we exclude outliers (as in Harrison et al.) or log-transform our JNDs later on (as in Kay and Heer)?
 
 ```{multiverse, exclusions, inside = M}
 # calculate values used to derive filtering conditions used in original paper
 df <- df %>%
+  # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
   group_by(visandsign) %>%
-  mutate(
-    p_chance_cutoff = branch(handle_performance_at_chance,
-      "exclude" ~ mean(jnd > .45) > 0.2, # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
-      "censor" ~ FALSE # don't exclude any data, censor instead
-    )
-  ) %>%
+  mutate(p_chance_cutoff = mean(jnd > .45) > 0.2) %>%
   group_by(visandsign, r, approach) %>%
   mutate(
     mad_cutoff = branch(handle_non_normality,
@@ -167,34 +162,30 @@ df <- branch(adjust_for_approach_bias,
 )
 ```
 
-In their reanalysis, Kay and Heer censor JNDs to reflect the limits that the data collection procedure places on possible values of JNDs that can be measured. This is basically an alternative to excluding JNDs so large that they reflect performance at or worse than chance. We include both alternatives in our multiverse analysis.
+<!-- In their reanalysis, Kay and Heer censor JNDs to reflect the limits that the data collection procedure places on possible values of JNDs that can be measured. This is basically an alternative to excluding JNDs so large that they reflect performance at or worse than chance. We include both alternatives in our multiverse analysis. -->
 
-```{multiverse, censoring, inside = M}
-df <- branch(handle_performance_at_chance,
-        "exclude" ~ df %>%
-          mutate(censored = FALSE), # to prevent error?
-        "censor" ~ df %>% 
-          mutate(
-            censoring_threshold = ifelse(approach == "below", 
-                                         pmin(r - .05, .4), 
-                                         pmin(.95 - r, .4)),
-            censored = jnd > censoring_threshold,
-            jnd = pmin(jnd, censoring_threshold) # censored JNDs
-          )
-)
-```
+
+<!-- ```{multiverse, censoring, inside = M} -->
+<!-- df <- branch(handle_performance_at_chance, -->
+<!--         "exclude" ~ df %>% -->
+<!--           mutate(censored = FALSE), # to prevent error? -->
+<!--         "censor" ~ df %>%  -->
+<!--           mutate( -->
+<!--             censoring_threshold = ifelse(approach == "below",  -->
+<!--                                          pmin(r - .05, .4),  -->
+<!--                                          pmin(.95 - r, .4)), -->
+<!--             censored = jnd > censoring_threshold, -->
+<!--             jnd = pmin(jnd, censoring_threshold) # censored JNDs -->
+<!--           ) -->
+<!-- ) -->
+<!-- ``` -->
 
 Now, we are ready to model our data. Multiple decisions impact the implementation here, so we use multiple branches to represent the impacts of *decisions we have already made* at the modeling stage. The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification.
 
 ```{multiverse, modeling, inside = M}
 m <- branch(random_effects,
   "yes" %when% {operationalize_jnd != "hierarchical"} ~ 
-    gamlss(
-      branch(handle_performance_at_chance,
-        "exclude" ~ jnd,
-        "censor" ~ Surv(jnd, !censored)
-      )
-        ~ r * visandsign 
+    gamlss(jnd ~ r * visandsign 
         * branch(adjust_for_approach_bias,
             "adjusted-correlation" ~ NULL,
             "approach-as-covariate" ~ approach_value
@@ -202,45 +193,22 @@ m <- branch(random_effects,
         + random(participant),
       sigma.formula = ~ visandsign,
       data = df,
-      family = branch(handle_performance_at_chance,
-        "exclude" ~ # non-censored models
-          branch(handle_non_normality,
-            "exclude" ~ NO, # linear models
-            "log-transform" ~ LOGNO # log-linear models
-          ),
-        "censor" ~ # censored models
-          cens(LOGNO) # only log-linear censored models converge well, consistent with Kay and Heer's choice not to use cens(NO)
-          # branch(handle_non_normality,
-          #   "exclude" ~ cens(NO), # linear models
-          #   "log-transform" ~ cens(LOGNO) # log-linear models
-          # )
+      family = branch(handle_non_normality,
+        "exclude" ~ NO, # linear models
+        "log-transform" ~ LOGNO # log-linear models
       )
     ),
   "no" %when% {operationalize_jnd != "hierarchical"} ~ 
-    gamlss(
-      branch(handle_performance_at_chance,
-        "exclude" ~ jnd,
-        "censor" ~ Surv(jnd, !censored)
-      ) 
-        ~ r * visandsign
+    gamlss(jnd ~ r * visandsign
         * branch(adjust_for_approach_bias,
             "adjusted-correlation" ~ NULL,
             "approach-as-covariate" ~ approach_value
           ),
       sigma.formula = ~ visandsign,
       data = df,
-      family = branch(handle_performance_at_chance,
-        "exclude" ~ # non-censored models
-          branch(handle_non_normality,
-            "exclude" ~ NO, # linear models
-            "log-transform" ~ LOGNO # log-linear models
-          ),
-        "censor" ~ # censored models
-          cens(LOGNO) # only log-linear censored models converge well, consistent with Kay and Heer's choice not to use cens(NO)
-          # branch(handle_non_normality,
-          #   "exclude" ~ cens(NO), # linear models
-          #   "log-transform" ~ cens(LOGNO) # log-linear models
-          # )
+      family = branch(handle_non_normality,
+        "exclude" ~ NO, # linear models
+        "log-transform" ~ LOGNO # log-linear models
       )
     ),
   "hierarchical" %when% operationalize_jnd == "hierarchical" ~ # logistic regression and derive JNDs after 
