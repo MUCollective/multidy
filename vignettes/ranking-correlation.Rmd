@@ -11,9 +11,8 @@ library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
 library(tidyr)          # unnest
-# library(survival)       # Surv
 library(gamlss)
-# library(gamlss.cens)    # cens
+library(quickpsy)       # quickpsy
 library(tidybayes)
 library(multiverse)
 
@@ -43,18 +42,24 @@ First, we load the data and change some variable names.
 # data("vis_correlation_all_judgments")
 load("../data/vis_correlation_all_judgments.rda")
 
-# rename correlation manipulations, and define difference (dr) between target correlation (r) and manipulated correlation (mr)
 df <- vis_correlation_all_judgments %>%
+  # one column for visualization condition and correlation direction
   unite("visandsign", vis:rdirection) %>%
+  # rename correlation manipulations, and define difference (dr) between target correlation (r) and manipulated correlation (mr)
   rename(
     r = rbase,
     mr = rv,
     correct = gotItRight
   ) %>%
+  # set up variables for modeling
   mutate(
     dr = abs(mr - r),
     participant = as.factor(participant)
-  )
+  ) %>%
+  # remove pre-computed JNDs; we will calculate our own JNDs
+  dplyr::select(-jnd) %>% 
+  # select handful of participants for debugging
+  filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf")) 
 ```
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
@@ -71,7 +76,7 @@ jnd_from_logistic <- function(intercept, slope) {
 }
 
 # necessary to avoid bug (for some reason)
-param_from_curve <- function(fit, param) {
+param_from_gamlss <- function(fit, param) {
   coeff <- map(fit, ~coef(.x))
   if (length(coeff[[1]]) == 1) {
     if (param == "intercept") {
@@ -91,31 +96,66 @@ param_from_curve <- function(fit, param) {
 
 ```{multiverse, jnds, inside = M}
 # operationalize just-noticeable differences (jnd)
-df <- branch(operationalize_jnd,
-  "staircase_convergence" ~  df %>%
-    group_by(participant, r, approach) %>%
-    filter(index > (max(index) - 24)) %>%
-    mutate(jnd = mean(dr)) %>%
-    ungroup() %>%
-    dplyr::select(-index),
-  "curve_fitting" ~ df %>%
-    group_by(participant, r, approach, visandsign) %>%
-    summarise(
-      dr = list(dr),
-      correct = list(as.integer(correct)),
-    ) %>%
-    mutate(
-      fit = map2(dr, correct, ~gamlss(.y ~ log(.x), family = BI)), # logistic regression with log stimulus intensity as predictor
-      # b_0 = map(fit, ~coef(.x))[[1]],
-      # b_1 = map(fit, ~coef(.x))[[2]],
-      b_0 = param_from_curve(fit, "intercept"),
-      b_1 = param_from_curve(fit, "slope"),
-      jnd = exp(jnd_from_logistic(b_0, b_1))
-    ) %>%
-    unnest(cols = c(dr, correct)) %>%
-    ungroup(),
-  "hierarchical" ~ df # derive jnds after model fitting
+derive_jnd <- branch(operationalize_jnd,
+  "staircase_convergence" ~ function(df) {
+    df <- df %>%
+      group_by(participant, r, approach) %>%
+      filter(index > (max(index) - 24)) %>%
+      mutate(jnd = mean(dr)) %>%
+      ungroup() %>%
+      dplyr::select(-index)
+    
+    return(df)
+  },
+  "logistic_curve_fitting" ~ function(df) {
+    df <- df %>%
+      group_by(participant, r, approach, visandsign) %>%
+      summarise(
+        dr = list(dr),
+        correct = list(as.integer(correct)),
+      ) %>%
+      mutate(
+        # logistic regression with log stimulus intensity as predictor
+        fit = map2(dr, correct, ~gamlss(.y ~ log(.x), family = BI)), 
+        b_0 = param_from_gamlss(fit, "intercept"),
+        b_1 = param_from_gamlss(fit, "slope"),
+        jnd = exp(jnd_from_logistic(b_0, b_1))
+      ) %>%
+      unnest(cols = c(dr, correct)) %>%
+      ungroup()
+    
+    return(df)
+  },
+  "guess_lapse_curve_fitting" ~ function(df) {
+    # prepare data for psychometeric function fitting
+    psy_data <- df %>%
+      group_by(participant, r, approach, visandsign, dr) %>%
+      summarise(
+        # number correct and number of trials at each level of stimulus intensity for each staircase
+        dr = unique(dr),
+        k = sum(as.integer(correct)),
+        n = n() 
+      ) 
+    
+    # fit a scaled and shifted cumulative Gaussian psychometric function with 
+    # guess rate of 0.5, lapse rate as a free parameter (as in Kale et al. 2019)
+    fit <- quickpsy(psy_data, dr, k, n, grouping = .(participant, r, approach, visandsign), bootstrap = "none", guess = 0.5, lapses = TRUE, log = TRUE, prob = 0.75, parini = c(0.2, 0.5, .01))
+    
+    # join results with original dataframe
+    df <- fit$thresholds %>%
+      group_by(participant, r, approach, visandsign) %>%
+      rename(jnd = thre) %>%
+      full_join(df, by = c("participant", "r", "approach", "visandsign")) %>%
+      ungroup()
+    
+    return(df)
+  },
+  "hierarchical" ~ function(df) { # derive jnds after model fitting
+    return(df)
+  } 
 )
+
+df <- derive_jnd(df)
 ```
   
 Here, we create and apply a logical index for exclusion criteria. First, we handle chance performance by excluding entire `visandsign` conditions where there are too many staircases with performance worse than chance (as in Harrison et al.). Kay and Heer addressed this issue by censoring the data, but we were not able to get censored models to converge for our analysis. Thus, we leave this decision out.
@@ -163,7 +203,6 @@ df <- branch(adjust_for_approach_bias,
 ```
 
 <!-- In their reanalysis, Kay and Heer censor JNDs to reflect the limits that the data collection procedure places on possible values of JNDs that can be measured. This is basically an alternative to excluding JNDs so large that they reflect performance at or worse than chance. We include both alternatives in our multiverse analysis. -->
-
 
 <!-- ```{multiverse, censoring, inside = M} -->
 <!-- df <- branch(handle_performance_at_chance, -->
@@ -230,60 +269,73 @@ Now we postprocess our models. The way we do this depends on *decisions we've al
 ```{multiverse, postprocessing, inside = M}
 postprocess <- branch(operationalize_jnd,
     "staircase_convergence" ~ function(m, df) { # extract predicted JNDs from model 
-        output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-          branch(adjust_for_approach_bias,
-            "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
-            "approach-as-covariate" ~ mutate(approach_value = 0)
-          ) %>%
-          cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
-          rename(jnd = prediction) %>%
-          group_by(r, visandsign) %>%
-          median_qi(jnd)
-          
-        return(output)
-      },
-    "curve_fitting" ~ function(m, df) { # extract predicted JNDs from model
-        output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-          branch(adjust_for_approach_bias,
-            "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
-            "approach-as-covariate" ~ mutate(approach_value = 0)
-          ) %>%
-          cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
-          rename(jnd = prediction) %>%
-          group_by(r, visandsign) %>%
-          median_qi(jnd)
-          
-        return(output)
-      },
+      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+        branch(adjust_for_approach_bias,
+          "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
+          "approach-as-covariate" ~ mutate(approach_value = 0)
+        ) %>%
+        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        rename(jnd = prediction) %>%
+        group_by(r, visandsign) %>%
+        median_qi(jnd)
+        
+      return(output)
+    },
+    "logistic_curve_fitting" ~ function(m, df) { # extract predicted JNDs from model
+      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+        branch(adjust_for_approach_bias,
+          "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
+          "approach-as-covariate" ~ mutate(approach_value = 0)
+        ) %>%
+        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        rename(jnd = prediction) %>%
+        group_by(r, visandsign) %>%
+        median_qi(jnd)
+        
+      return(output)
+    },
+    "guess_lapse_curve_fitting" ~ function(m, df) { # extract predicted JNDs from model
+      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+        branch(adjust_for_approach_bias,
+          "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
+          "approach-as-covariate" ~ mutate(approach_value = 0)
+        ) %>%
+        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        rename(jnd = prediction) %>%
+        group_by(r, visandsign) %>%
+        median_qi(jnd)
+        
+      return(output)
+    },
     "hierarchical" ~ function(m, df) { # derive JNDs from hierarchical model fit
-        predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-          branch(adjust_for_approach_bias,
-            "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
-            "approach-as-covariate" ~ mutate(approach_value = 0)
-          ) %>%
-          cbind(prediction = predict(m, newdata = ., data = df, type = "response"))
+      predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+        branch(adjust_for_approach_bias,
+          "adjusted-correlation" ~ (function(d) { return(d) }), # do nothing
+          "approach-as-covariate" ~ mutate(approach_value = 0)
+        ) %>%
+        cbind(prediction = predict(m, newdata = ., data = df, type = "response"))
+      
+      slope_df <- predictions %>%
+        group_by(r, dr, visandsign, participant) %>%
+        compare_levels(prediction, by = dr) %>%
+        rename(b_1 = prediction) %>%
+        dplyr::select(-dr)
         
-        slope_df <- predictions %>%
-          group_by(r, dr, visandsign, participant) %>%
-          compare_levels(prediction, by = dr) %>%
-          rename(b_1 = prediction) %>%
-          dplyr::select(-dr)
-          
-        intercept_df <- predictions %>%
-          filter(dr == exp(0)) %>%
-          rename(b_0 = prediction) %>%
-          dplyr::select(-dr)
+      intercept_df <- predictions %>%
+        filter(dr == exp(0)) %>%
+        rename(b_0 = prediction) %>%
+        dplyr::select(-dr)
+      
+      output <- slope_df %>%
+        full_join(intercept_df, by = c("r", "visandsign", "participant")) %>%
+        mutate(
+          jnd = exp(jnd_from_logistic(b_0, b_1))
+        ) %>%
+        group_by(r, visandsign) %>%
+        median_qi(jnd)
         
-        output <- slope_df %>%
-          full_join(intercept_df, by = c("r", "visandsign", "participant")) %>%
-          mutate(
-            jnd = exp(jnd_from_logistic(b_0, b_1))
-          ) %>%
-          group_by(r, visandsign) %>%
-          median_qi(jnd)
-          
-        return(output)
-      }
+      return(output)
+    }
 )
 
 output <- postprocess(m, df)
