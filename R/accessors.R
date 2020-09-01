@@ -48,7 +48,8 @@ expand.multiverse <- function(multiverse) {
   .m_obj = attr(multiverse, "multiverse")
   .m_list = .m_obj$multiverse_diction$as_list()
   
-  df <- data.frame( lapply(expand.grid(.m_obj$parameters, KEEP.OUT.ATTRS = FALSE), unlist), stringsAsFactors = FALSE )
+  df <- data.frame( lapply(expand.grid(rev(.m_obj$parameters), KEEP.OUT.ATTRS = FALSE), unlist), stringsAsFactors = FALSE ) %>%
+    select(names(.m_obj$parameters))
   
   if (length(.m_obj$conditions) > 0) {
     all_conditions <- parse_expr(paste0("(", .m_obj$conditions, ")", collapse = "&"))
@@ -67,15 +68,19 @@ expand.multiverse <- function(multiverse) {
     }
     df <- tibble(.universe = seq(1:n))
   } else {
+    df <- filter(df, eval(all_conditions))
     n <- nrow(df)
     param.assgn =  lapply(seq_len(n), function(i) lapply(df, "[[", i))
     .code = lapply(seq_len(n), get_code_universe, .m_list = .m_list, .level = length(.m_list))
     .res = lapply( unlist(unname(tail(.m_list, n = 1)), recursive = FALSE), `[[`, "env" )
   }
   
-  df <- filter(mutate(df, .parameter_assignment = param.assgn, .code = .code, .results = .res), eval(all_conditions))
-  
-  select(mutate(df, .universe = 1:nrow(df)), .universe, everything())
+  select(mutate(as_tibble(df), 
+                      .universe = 1:nrow(df), 
+                      .parameter_assignment = param.assgn, 
+                      .code = .code, 
+                      .results = .res
+                    ), .universe, everything())
 }
 
 #' @rdname accessors
