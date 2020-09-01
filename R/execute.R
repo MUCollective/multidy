@@ -46,9 +46,9 @@
 #' @export
 execute_multiverse <- function(multiverse, cores = getOption("mc.cores", 1L)) {
   m_diction = attr(multiverse, "multiverse")$multiverse_diction
-  n <- m_diction$as_list() %>% length()
-  
-  .to_exec = seq_len(m_diction$size()) #tail(seq_len(m_diction$size()), n = m_diction$size() - .level)
+  # n <- m_diction$as_list() %>% length()
+  # .to_exec = tail(seq_len(m_diction$size()), n = m_diction$size() - .level)
+  # .to_exec = seq_len(m_diction$size()) 
   
   .m_list <- m_diction$as_list()
   .res <- lapply(.m_list, exec_all)
@@ -61,8 +61,8 @@ exec_all <- function(x) {
   .res <- mapply(execute_code_from_universe, .code_list, .env_list)
   
   lapply(seq_along(.res), function(i, x) {
-    # print(.res)
-    if (is(x[[i]], "error") | is(x[[i]], "warning"))  warning("error in universe ", i, "\n", x[[i]])
+    if (is(x[[i]], "error"))  warning("error in universe ", i, "\n", x[[i]])
+    else if (is(x[[i]], "warning"))  warning("warning in universe ", i, "\n", x[[i]])
   }, x = .res)
 }
 
@@ -78,7 +78,7 @@ execute_universe <- function(multiverse, .universe = 1) {
   
   .m_list <- m_diction$as_list()[.to_exec]
   
-  invisible( mapply(exec_in_order, .m_list, .to_exec, MoreArgs = list(.universes = .order)) )
+  .res <- mapply(exec_in_order, .m_list, .to_exec, MoreArgs = list(.universes = .order))
 }
 
 execute_code_from_universe <- function(.c, .env = globalenv()) {
@@ -87,8 +87,15 @@ execute_code_from_universe <- function(.c, .env = globalenv()) {
           warning = function(w) w,
           error = function(e) e
       )
-  if (is(e, "error") | is(e, "warning")) e else .env
-  # lapply(.c, eval, envir = .env)
+  
+  if (is(e, "error")) {
+    # traceback()
+    return(e)
+  }  else if (is(e, "warning")) { 
+    return(e) 
+  } else {
+    return(NULL)
+  }
 }
 
 # for a universe, get the indices which need to be executed
@@ -102,7 +109,9 @@ get_exec_order <- function(.m_diction, .uni, .level) {
 exec_in_order <- function(.universe_list, .universes, .i) {
   x <- .universe_list[[ .universes[[.i]] ]]
   
-  execute_code_from_universe(x$code, x$env)
+  .exec_res <- execute_code_from_universe(x$code, x$env)
+  if (is(.exec_res, "error"))  warning("error in default universe", "\n", .exec_res)
+  else if (is(.exec_res, "warning"))  warning("warning in default universe", "\n", .exec_res)
 }
 
 
