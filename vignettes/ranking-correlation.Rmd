@@ -226,6 +226,28 @@ df <- adjustment(df)
 
 Now, we are ready to model our data. Multiple decisions impact the implementation here, so we use multiple branches to represent the impacts of *decisions we have already made* at the modeling stage. The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification.
 
+We are using `gamlss` for modeling, and this package makes an assumption that the data the model is fit to will be found in the global evironment scope. This assumption is fine for normal use cases, but it does not work with `multiverse` which creates a separate environment for each universe. Without a workaround, `gamlss` will fit to the wrong data, and there will be a mismatch between our preprocessing and the model spec. We define some wrapper functions that deal with this scope issue as a work-around.
+
+```{r}
+gamlss_ = function(..., data = sys.parent()) {
+  dd = data
+  m = gamlss(..., data = dd)
+  m$data = data
+  m
+}
+
+predict_ = function(object, ...) {
+  old_dd = get0("dd", envir = globalenv(), inherits = FALSE)
+  assign("dd", object$data, envir = globalenv())
+  on.exit(
+    if (is.null(old_dd)) rm(dd, envir = globalenv())
+    else assign("dd", old_dd, envir = globalenv())
+  )
+  predict(object, ...)
+}
+```
+
+
 ```{multiverse, modeling, inside = M}
 m <- branch(random_effects,
   "yes" %when% (operationalize_jnd != "hierarchical") ~ 
@@ -242,7 +264,7 @@ m <- branch(random_effects,
     #     "log_transform" ~ gaussian(link = "log") # log-linear models
     #   )
     # ),
-    gamlss(jnd ~ r * visandsign
+    gamlss_(jnd ~ r * visandsign
         * branch(adjust_for_approach_bias,
             "adjusted_correlation" ~ NULL,
             "approach_as_covariate" ~ approach_value
@@ -268,7 +290,7 @@ m <- branch(random_effects,
     #     "log_transform" ~ gaussian(link = "log") # log-linear models
     #   )
     # )
-    gamlss(jnd ~ r * visandsign
+    gamlss_(jnd ~ r * visandsign
         * branch(adjust_for_approach_bias,
             "adjusted_correlation" ~ NULL,
             "approach_as_covariate" ~ approach_value
@@ -314,7 +336,7 @@ postprocess <- branch(operationalize_jnd,
           "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
           "approach_as_covariate" ~ mutate(approach_value = 0)
         ) %>%
-        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
         rename(jnd = prediction) %>%
         group_by(r, visandsign) %>%
         median_qi(jnd)
@@ -327,7 +349,7 @@ postprocess <- branch(operationalize_jnd,
           "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
           "approach_as_covariate" ~ mutate(approach_value = 0)
         ) %>%
-        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
         rename(jnd = prediction) %>%
         group_by(r, visandsign) %>%
         median_qi(jnd)
@@ -340,7 +362,7 @@ postprocess <- branch(operationalize_jnd,
           "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
           "approach_as_covariate" ~ mutate(approach_value = 0)
         ) %>%
-        cbind(prediction = predict(m, newdata = ., data = df, type = "response")) %>%
+        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
         rename(jnd = prediction) %>%
         group_by(r, visandsign) %>%
         median_qi(jnd)
@@ -408,11 +430,11 @@ M_expand <- multiverse::expand(M)
 ```
 
 ```{r}
-M_expand$.code[[17]]
+M_expand$.code[[17]] # come back to 11
 ```
 
 ```{r}
-M_expand$.results[[5]]$df
+# M_expand$.results[[5]]$df
 ```
 
 ```{r}
