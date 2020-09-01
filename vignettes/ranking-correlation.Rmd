@@ -158,13 +158,13 @@ df <- df %>%
   group_by(visandsign) %>%
   mutate(
     p_chance_cutoff = branch(handle_performance_at_chance,
-      "exclude" %when% {operationalize_jnd != "hierarchical"} ~ mean(jnd > .45) > 0.2 
+      "exclude" %when% (operationalize_jnd != "hierarchical") ~ mean(jnd > .45) > 0.2 
     )
   ) %>%
   group_by(visandsign, r, approach) %>%
   mutate(
     mad_cutoff = branch(handle_non_normality,
-      "exclude" %when% {operationalize_jnd != "hierarchical"} ~ abs(jnd - median(jnd)) > 3 * mad(jnd), # exclude observations > 3 median-absolute deviations from the median within each group
+      "exclude" %when% (operationalize_jnd != "hierarchical") ~ abs(jnd - median(jnd)) > 3 * mad(jnd), # exclude observations > 3 median-absolute deviations from the median within each group
       "log_transform" ~ FALSE # don't exclude any data, log transform instead
     )
   ) %>%
@@ -228,7 +228,7 @@ Now, we are ready to model our data. Multiple decisions impact the implementatio
 
 ```{multiverse, modeling, inside = M}
 m <- branch(random_effects,
-  "yes" %when% {operationalize_jnd != "hierarchical"} ~ 
+  "yes" %when% (operationalize_jnd != "hierarchical") ~ 
     # glmer(jnd ~ r * visandsign 
     #     * branch(adjust_for_approach_bias,
     #         "adjusted_correlation" ~ NULL,
@@ -255,7 +255,7 @@ m <- branch(random_effects,
         "log_transform" ~ LOGNO # log-linear models
       )
     ),
-  "no" %when% {operationalize_jnd != "hierarchical"} ~ 
+  "no" %when% (operationalize_jnd != "hierarchical") ~ 
     # glm(jnd ~ r * visandsign
     #     * branch(adjust_for_approach_bias,
     #         "adjusted_correlation" ~ NULL,
