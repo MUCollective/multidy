@@ -11,9 +11,10 @@ library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
 library(tidyr)          # unnest
-library(gamlss)
-# library(lme4)
+# library(gamlss)
+library(lme4)
 library(quickpsy)       # quickpsy
+library(emmeans)
 library(tidybayes)
 library(multiverse)
 
@@ -108,7 +109,8 @@ derive_jnd <- branch(operationalize_jnd,
         jnd = exp(jnd_from_logistic(b_0, b_1))
       ) %>%
       unnest(cols = c(dr, correct)) %>%
-      ungroup()
+      ungroup() %>%
+      dplyr::select(-index)
     
     return(df)
   },
@@ -134,12 +136,13 @@ derive_jnd <- branch(operationalize_jnd,
       full_join(df, by = c("participant", "r", "approach", "visandsign")) %>%
       ungroup() %>%
       # this approach sometimes fails generating NA values for jnd that we need to drop
-      drop_na()
+      drop_na() %>%
+      dplyr::select(-index)
     
     return(df)
   }#,
-  # "hierarchical" ~ function(df) { # derive jnds after model fitting
-  #   return(df)
+  # "hierarchical" ~ { # derive jnds after model fitting
+  #   df
   # } 
 )
 
@@ -226,82 +229,97 @@ df <- adjustment(df)
 
 Now, we are ready to model our data. Multiple decisions impact the implementation here, so we use multiple branches to represent the impacts of *decisions we have already made* at the modeling stage. The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification.
 
-We are using `gamlss` for modeling, and this package makes an assumption that the data the model is fit to will be found in the global evironment scope. This assumption is fine for normal use cases, but it does not work with `multiverse` which creates a separate environment for each universe. Without a workaround, `gamlss` will fit to the wrong data, and there will be a mismatch between our preprocessing and the model spec. We define some wrapper functions that deal with this scope issue as a work-around.
+<!-- We are using `gamlss` for modeling, and this package makes an assumption that the data the model is fit to will be found in the global evironment scope. This assumption is fine for normal use cases, but it does not work with `multiverse` which creates a separate environment for each universe. Without a workaround, `gamlss` will fit to the wrong data, and there will be a mismatch between our preprocessing and the model spec. We define some wrapper functions that deal with this scope issue as a work-around. -->
 
-```{r}
-gamlss_ = function(..., data = sys.parent()) {
-  dd = data
-  m = gamlss(..., data = dd)
-  m$data = data
-  m
-}
+<!-- ```{r} -->
+<!-- gamlss_ = function(..., data = sys.parent()) { -->
+<!--   dd = data -->
+<!--   m = gamlss(..., data = dd) -->
+<!--   m$data = data -->
+<!--   m -->
+<!-- } -->
 
-predict_ = function(object, ...) {
-  old_dd = get0("dd", envir = globalenv(), inherits = FALSE)
-  assign("dd", object$data, envir = globalenv())
-  on.exit(
-    if (is.null(old_dd)) rm(dd, envir = globalenv())
-    else assign("dd", old_dd, envir = globalenv())
-  )
-  predict(object, ...)
-}
-```
+<!-- predict_ = function(object, ...) { -->
+<!--   old_dd = get0("dd", envir = globalenv(), inherits = FALSE) -->
+<!--   assign("dd", object$data, envir = globalenv()) -->
+<!--   on.exit( -->
+<!--     if (is.null(old_dd)) rm(dd, envir = globalenv()) -->
+<!--     else assign("dd", old_dd, envir = globalenv()) -->
+<!--   ) -->
+<!--   predict(object, ...) -->
+<!-- } -->
+<!-- ``` -->
 
 
 ```{multiverse, modeling, inside = M}
 m <- branch(random_effects,
-  "yes" %when% (operationalize_jnd != "hierarchical") ~ 
-    # glmer(jnd ~ r * visandsign 
+  "yes" %when% (operationalize_jnd != "hierarchical") ~
+    branch(handle_non_normality,
+      "exclude" ~ # linear model
+        lmer(jnd ~ r * visandsign
+            * branch(adjust_for_approach_bias,
+                "adjusted_correlation" ~ NULL,
+                "approach_as_covariate" ~ approach_value
+              )
+            + (1 | participant),
+          data = df
+        ),
+      "log_transform" ~ # log-linear model
+        glmer(jnd ~ r * visandsign
+            * branch(adjust_for_approach_bias, # conditions avoid fit issues in specific universes
+                "adjusted_correlation" ~ NULL, #%when% (operationalize_jnd != "staircase_convergence")
+                "approach_as_covariate" ~ approach_value #%when% (operationalize_jnd == "guess_lapse_curve_fitting")
+              )
+            + (1 | participant),
+          data = df,
+          family = gaussian(link = "log")
+        )
+    ),
+    # gamlss_(jnd ~ r * visandsign
     #     * branch(adjust_for_approach_bias,
     #         "adjusted_correlation" ~ NULL,
     #         "approach_as_covariate" ~ approach_value
     #       )
-    #     + (1 | participant),
-    #   # sigma.formula = ~ visandsign,
+    #     + random(participant),
+    #   sigma.formula = ~ visandsign,
     #   data = df,
     #   family = branch(handle_non_normality,
-    #     "exclude" ~ gaussian, # linear models
-    #     "log_transform" ~ gaussian(link = "log") # log-linear models
+    #     "exclude" ~ NO, # linear models
+    #     "log_transform" ~ LOGNO # log-linear models
     #   )
     # ),
-    gamlss_(jnd ~ r * visandsign
-        * branch(adjust_for_approach_bias,
-            "adjusted_correlation" ~ NULL,
-            "approach_as_covariate" ~ approach_value
-          )
-        + random(participant),
-      sigma.formula = ~ visandsign,
-      data = df,
-      family = branch(handle_non_normality,
-        "exclude" ~ NO, # linear models
-        "log_transform" ~ LOGNO # log-linear models
-      )
-    ),
   "no" %when% (operationalize_jnd != "hierarchical") ~ 
-    # glm(jnd ~ r * visandsign
+    branch(handle_non_normality,
+      "exclude" ~ # linear model
+        lm(jnd ~ r * visandsign
+            * branch(adjust_for_approach_bias,
+                "adjusted_correlation" ~ NULL,
+                "approach_as_covariate" ~ approach_value
+              ),
+          data = df
+        ),
+      "log_transform" ~ # log-linear model
+        glm(jnd ~ r * visandsign
+            * branch(adjust_for_approach_bias,
+                "adjusted_correlation" ~ NULL,
+                "approach_as_covariate" ~ approach_value
+              ),
+          data = df,
+          family = gaussian(link = "log")
+        )
+    )#,
+    # gamlss_(jnd ~ r * visandsign
     #     * branch(adjust_for_approach_bias,
     #         "adjusted_correlation" ~ NULL,
     #         "approach_as_covariate" ~ approach_value
     #       ),
-    #   # sigma.formula = ~ visandsign,
+    #   sigma.formula = ~ visandsign,
     #   data = df,
     #   family = branch(handle_non_normality,
-    #     "exclude" ~ gaussian, # linear models
-    #     "log_transform" ~ gaussian(link = "log") # log-linear models
+    #     "exclude" ~ NO, # linear models
+    #     "log_transform" ~ LOGNO # log-linear models
     #   )
-    # )
-    gamlss_(jnd ~ r * visandsign
-        * branch(adjust_for_approach_bias,
-            "adjusted_correlation" ~ NULL,
-            "approach_as_covariate" ~ approach_value
-          ),
-      sigma.formula = ~ visandsign,
-      data = df,
-      family = branch(handle_non_normality,
-        "exclude" ~ NO, # linear models
-        "log_transform" ~ LOGNO # log-linear models
-      )
-    )#,
+    # )#,
   # "hierarchical" %when% operationalize_jnd == "hierarchical" ~ # logistic regression and derive JNDs after 
     # glmer(correct ~ r * log(dr) * visandsign
     #     * branch(adjust_for_approach_bias,
@@ -330,54 +348,112 @@ Now we postprocess our models. The way we do this depends on *decisions we've al
 
 ```{multiverse, postprocessing, inside = M}
 postprocess <- branch(operationalize_jnd,
-    "staircase_convergence" ~ function(m, df) { # extract predicted JNDs from model 
-      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-        branch(adjust_for_approach_bias,
-          "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-          "approach_as_covariate" ~ mutate(approach_value = 0)
+    "staircase_convergence" ~ function(m) {
+      # extract marginal estimate for JNDs in each level of visandsign
+      output <- m %>% 
+        emmeans(~ visandsign, 
+          cov.keep = c("r"), 
+          type = "response"
+        ) %>% 
+        summary() %>% # to dataframe
+        rename(
+          jnd = response,
+          lowerCI = asymp.LCL,
+          upperCI = asymp.UCL
         ) %>%
-        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
-        rename(jnd = prediction) %>%
-        group_by(r, visandsign) %>%
-        median_qi(jnd)
-        
+        dplyr::select(-df)
+      
+      # # set up data grid for prediction
+      # data_grid <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+      #   branch(adjust_for_approach_bias,
+      #     "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
+      #     "approach_as_covariate" ~ mutate(approach_value = 0)
+      #   )
+      # 
+      # # extract predicted JNDs from model
+      # prediction <- predict(m, se.fit = TRUE, newdata = data_grid, data = df, type = "response")
+      # 
+      # output <- data_grid %>%
+      #   mutate(
+      #     # unpack fitted predictions and standard errors to dataframe
+      #     fit = prediction$fit,
+      #     se.fit = prediction$se.fit,
+      #     # simulate draws from a t distribution to transform into a sampling distribution of JNDs
+      #     .draw = list(1:5000),
+      #     t = map(df, ~rt(5000, .))
+      #   ) %>%
+      #   unnest(cols = c(".draw", "t")) %>%
+      #   # scale and shift t to get a sampling distribution of average JNDs for each condition in the data grid
+      #   mutate(jnd = t * se.fit + fit) %>%
+      #   group_by(r, visandsign) %>%
+      #   median_qi(jnd)
+      
+      # # extract predicted JNDs from model
+      # output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+      #   branch(adjust_for_approach_bias,
+      #     "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
+      #     "approach_as_covariate" ~ mutate(approach_value = 0)
+      #   ) %>%
+      #   cbind(prediction = predict(m, se.fit = TRUE, newdata = ., data = df, type = "response")) %>%
+      #   mutate(
+      #     # unpack fitted predictions and standard errors to dataframe
+      #     fit = prediction$fit,
+      #     se.fit = prediction$se.fit,
+      #     # simulate draws from a t distribution to transform into a sampling distribution of JNDs
+      #     .draw = list(1:5000),
+      #     t = map(df, ~rt(5000, .))
+      #   ) %>%
+      #   unnest(cols = c(".draw", "t")) %>%
+      #   # scale and shift t to get a sampling distribution of average JNDs for each condition in the data grid
+      #   mutate(jnd = t * se.fit + fit) %>%
+      #   group_by(r, visandsign) %>%
+      #   median_qi(jnd)
+
       return(output)
     },
-    "logistic_curve_fitting" ~ function(m, df) { # extract predicted JNDs from model
-      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-        branch(adjust_for_approach_bias,
-          "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-          "approach_as_covariate" ~ mutate(approach_value = 0)
+    "logistic_curve_fitting" ~ function(m) {
+      # extract marginal estimate for JNDs in each level of visandsign
+      output <- m %>% 
+        emmeans(~ visandsign, 
+          cov.keep = c("r"), 
+          type = "response"
+        ) %>% 
+        summary() %>% # to dataframe
+        rename(
+          jnd = response,
+          lowerCI = asymp.LCL,
+          upperCI = asymp.UCL
         ) %>%
-        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
-        rename(jnd = prediction) %>%
-        group_by(r, visandsign) %>%
-        median_qi(jnd)
-        
+        dplyr::select(-df)
+
       return(output)
     },
-    "guess_lapse_curve_fitting" ~ function(m, df) { # extract predicted JNDs from model
-      output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-        branch(adjust_for_approach_bias,
-          "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-          "approach_as_covariate" ~ mutate(approach_value = 0)
+    "guess_lapse_curve_fitting" ~ function(m) {
+      # extract marginal estimate for JNDs in each level of visandsign
+      output <- m %>% 
+        emmeans(~ visandsign, 
+          cov.keep = c("r"), 
+          type = "response"
+        ) %>% 
+        summary() %>% # to dataframe
+        rename(
+          jnd = response,
+          lowerCI = asymp.LCL,
+          upperCI = asymp.UCL
         ) %>%
-        cbind(prediction = predict_(m, newdata = ., data = df, type = "response")) %>%
-        rename(jnd = prediction) %>%
-        group_by(r, visandsign) %>%
-        median_qi(jnd)
-        
+        dplyr::select(-df)
+
       return(output)
     }#,
-    # "hierarchical" ~ function(m, df) { # derive JNDs from hierarchical model fit
+    # "hierarchical" ~ function(m, df) {
     #   # extract predictions for probability of answering correctly
     #   predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
     #     branch(adjust_for_approach_bias,
     #       "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
     #       "approach_as_covariate" ~ mutate(approach_value = 0)
     #     ) %>%
-    #     cbind(prediction = predict(m, newdata = ., data = df, type = "response"))
-    #   
+    #     cbind(prediction = predict(m, se.fit = TRUE, newdata = ., data = df, type = "response"))
+    #
     #   # use predictions at stimulus intensities of 0 and 1 (exponentiated) to calculate slope and intercept
     #   slope_df <- predictions %>%
     #     group_by(r, dr, visandsign, participant) %>%
@@ -388,12 +464,13 @@ postprocess <- branch(operationalize_jnd,
     #     filter(dr == exp(0)) %>%
     #     rename(b_0 = prediction) %>%
     #     dplyr::select(-dr)
+    #
     #   output <- slope_df %>%
     #     full_join(intercept_df, by = c("r", "visandsign", "participant")) %>%
     #     mutate(
-    #       jnd = exp(jnd_from_logistic(b_0, b_1)) # finally define JNDs 
+    #       jnd = exp(jnd_from_logistic(b_0, b_1)) # finally define JNDs
     #     ) %>%
-    #   
+    #
     #     # apply exclusion criteria to JNDs now that we've defined them in this branch:
     #     # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
     #     group_by(visandsign) %>%
@@ -409,16 +486,16 @@ postprocess <- branch(operationalize_jnd,
     #     # aggregate exclusion criteria
     #     mutate(exclude = p_chance_cutoff | mad_cutoff) %>%
     #     filter(!exclude) %>%
-    #     
+    #
     #     # aggregate JND estimates to output format
     #     group_by(r, visandsign) %>%
     #     median_qi(jnd)
-    #     
+    #
     #   return(output)
     # }
 )
 
-output <- postprocess(m, df)
+output <- postprocess(m)
 ```
 
 ```{r}
@@ -430,7 +507,7 @@ M_expand <- multiverse::expand(M)
 ```
 
 ```{r}
-M_expand$.code[[17]] # come back to 11
+M_expand$.code[[4]]
 ```
 
 ```{r}
