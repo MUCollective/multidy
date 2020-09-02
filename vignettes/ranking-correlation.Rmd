@@ -11,7 +11,6 @@ library(magrittr)       # %>%, %<>%
 library(dplyr)          # filter, rename, mutate, group_by, ungroup, ...
 library(purrr)          # map2
 library(tidyr)          # unnest
-# library(gamlss)
 library(lme4)
 library(quickpsy)       # quickpsy
 library(emmeans)
@@ -66,7 +65,8 @@ df <- vis_correlation_all_judgments %>%
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
  - Derive JNDs by assuming staircase convergence, taking the average stimulus intensity over the last 24 trials as in Harrison et al.'s original analysis.
- - Fit curves to all the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
+ - Fit logistic regressions to the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
+ - Fit scaled and shifted cumulative Gaussian psychometric functions (as in [Kale et al. 2018](http://users.eecs.northwestern.edu/~jhullman/hops_jobs_pfs.pdf) to the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
  - Fit a big hierarchical model to all judgments and derive JNDs from the joint model fit.
 
 Two of these strategies require a function to estimate JNDs from the slope and intercept of logistic regression.
@@ -94,6 +94,7 @@ derive_jnd <- branch(operationalize_jnd,
   "logistic_curve_fitting" ~ function(df) {
     df <- df %>%
       group_by(participant, r, approach, visandsign) %>%
+      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         dr = list(dr),
         correct = list(as.integer(correct)),
@@ -109,8 +110,7 @@ derive_jnd <- branch(operationalize_jnd,
         jnd = exp(jnd_from_logistic(b_0, b_1))
       ) %>%
       unnest(cols = c(dr, correct)) %>%
-      ungroup() %>%
-      dplyr::select(-index)
+      ungroup()
     
     return(df)
   },
@@ -118,9 +118,9 @@ derive_jnd <- branch(operationalize_jnd,
     # prepare data for psychometeric function fitting
     psy_data <- df %>%
       group_by(participant, r, approach, visandsign, dr) %>%
+      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         # number correct and number of trials at each level of stimulus intensity for each staircase
-        # dr = unique(dr),
         k = sum(as.integer(correct)),
         n = n() 
       ) 
@@ -136,11 +136,11 @@ derive_jnd <- branch(operationalize_jnd,
       full_join(df, by = c("participant", "r", "approach", "visandsign")) %>%
       ungroup() %>%
       # this approach sometimes fails generating NA values for jnd that we need to drop
-      drop_na() %>%
-      dplyr::select(-index)
+      drop_na()
     
     return(df)
   }#,
+  # TODO: add hierarchical path
   # "hierarchical" ~ { # derive jnds after model fitting
   #   df
   # } 
@@ -210,46 +210,7 @@ adjustment <- branch(adjust_for_approach_bias,
 df <- adjustment(df)
 ```
 
-<!-- In their reanalysis, Kay and Heer censor JNDs to reflect the limits that the data collection procedure places on possible values of JNDs that can be measured. This is basically an alternative to excluding JNDs so large that they reflect performance at or worse than chance. We include both alternatives in our multiverse analysis. -->
-
-<!-- ```{multiverse, censoring, inside = M} -->
-<!-- df <- branch(handle_performance_at_chance, -->
-<!--         "exclude" ~ df %>% -->
-<!--           mutate(censored = FALSE), # to prevent error? -->
-<!--         "censor" ~ df %>%  -->
-<!--           mutate( -->
-<!--             censoring_threshold = ifelse(approach == "below",  -->
-<!--                                          pmin(r - .05, .4),  -->
-<!--                                          pmin(.95 - r, .4)), -->
-<!--             censored = jnd > censoring_threshold, -->
-<!--             jnd = pmin(jnd, censoring_threshold) # censored JNDs -->
-<!--           ) -->
-<!-- ) -->
-<!-- ``` -->
-
 Now, we are ready to model our data. Multiple decisions impact the implementation here, so we use multiple branches to represent the impacts of *decisions we have already made* at the modeling stage. The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification.
-
-<!-- We are using `gamlss` for modeling, and this package makes an assumption that the data the model is fit to will be found in the global evironment scope. This assumption is fine for normal use cases, but it does not work with `multiverse` which creates a separate environment for each universe. Without a workaround, `gamlss` will fit to the wrong data, and there will be a mismatch between our preprocessing and the model spec. We define some wrapper functions that deal with this scope issue as a work-around. -->
-
-<!-- ```{r} -->
-<!-- gamlss_ = function(..., data = sys.parent()) { -->
-<!--   dd = data -->
-<!--   m = gamlss(..., data = dd) -->
-<!--   m$data = data -->
-<!--   m -->
-<!-- } -->
-
-<!-- predict_ = function(object, ...) { -->
-<!--   old_dd = get0("dd", envir = globalenv(), inherits = FALSE) -->
-<!--   assign("dd", object$data, envir = globalenv()) -->
-<!--   on.exit( -->
-<!--     if (is.null(old_dd)) rm(dd, envir = globalenv()) -->
-<!--     else assign("dd", old_dd, envir = globalenv()) -->
-<!--   ) -->
-<!--   predict(object, ...) -->
-<!-- } -->
-<!-- ``` -->
-
 
 ```{multiverse, modeling, inside = M}
 m <- branch(random_effects,
@@ -267,27 +228,15 @@ m <- branch(random_effects,
       "log_transform" ~ # log-linear model
         glmer(jnd ~ r * visandsign
             * branch(adjust_for_approach_bias, # conditions avoid fit issues in specific universes
-                "adjusted_correlation" ~ NULL, #%when% (operationalize_jnd != "staircase_convergence")
-                "approach_as_covariate" ~ approach_value #%when% (operationalize_jnd == "guess_lapse_curve_fitting")
+                "adjusted_correlation" ~ NULL,
+                # AMK: condition on next line should cut 2 universes, but cuts 8. what is happening?
+                "approach_as_covariate" %when% (operationalize_jnd == "guess_lapse_curve_fitting") ~ approach_value
               )
             + (1 | participant),
           data = df,
           family = gaussian(link = "log")
         )
     ),
-    # gamlss_(jnd ~ r * visandsign
-    #     * branch(adjust_for_approach_bias,
-    #         "adjusted_correlation" ~ NULL,
-    #         "approach_as_covariate" ~ approach_value
-    #       )
-    #     + random(participant),
-    #   sigma.formula = ~ visandsign,
-    #   data = df,
-    #   family = branch(handle_non_normality,
-    #     "exclude" ~ NO, # linear models
-    #     "log_transform" ~ LOGNO # log-linear models
-    #   )
-    # ),
   "no" %when% (operationalize_jnd != "hierarchical") ~ 
     branch(handle_non_normality,
       "exclude" ~ # linear model
@@ -308,38 +257,16 @@ m <- branch(random_effects,
           family = gaussian(link = "log")
         )
     )#,
-    # gamlss_(jnd ~ r * visandsign
-    #     * branch(adjust_for_approach_bias,
-    #         "adjusted_correlation" ~ NULL,
-    #         "approach_as_covariate" ~ approach_value
-    #       ),
-    #   sigma.formula = ~ visandsign,
-    #   data = df,
-    #   family = branch(handle_non_normality,
-    #     "exclude" ~ NO, # linear models
-    #     "log_transform" ~ LOGNO # log-linear models
-    #   )
-    # )#,
-  # "hierarchical" %when% operationalize_jnd == "hierarchical" ~ # logistic regression and derive JNDs after 
+  # TODO: add hierarchical path
+  # "hierarchical" %when% (operationalize_jnd == "hierarchical") ~ # logistic regression and derive JNDs after 
     # glmer(correct ~ r * log(dr) * visandsign
     #     * branch(adjust_for_approach_bias,
     #         "adjusted_correlation" ~ NULL,
     #         "approach_as_covariate" ~ approach_value
     #       )
     #     + (1 | participant),
-    #   # sigma.formula = ~ visandsign,
     #   data = df,
     #   family = binomial
-    # )
-    # gamlss(correct ~ r * log(dr) * visandsign
-    #     * branch(adjust_for_approach_bias,
-    #         "adjusted_correlation" ~ NULL,
-    #         "approach_as_covariate" ~ approach_value
-    #       )
-    #     + random(participant),
-    #   sigma.formula = ~ visandsign,
-    #   data = df,
-    #   family = BI
     # )
 )
 ```
@@ -347,6 +274,7 @@ m <- branch(random_effects,
 Now we postprocess our models. The way we do this depends on *decisions we've already made* about how to derive JNDs and adjust for approach bias. The primary branch below is that when we derive JNDs before fitting an inferential model, we just need to extract and aggregate model predictions, whereas when we fit a hierarchical logistic regression to all the data, we need to derive JNDs from this model fit after fitting the model.
 
 ```{multiverse, postprocessing, inside = M}
+# AMK: why is there an unexpected * in the model formula when I call emmeans?
 postprocess <- branch(operationalize_jnd,
     "staircase_convergence" ~ function(m) {
       # extract marginal estimate for JNDs in each level of visandsign
@@ -355,59 +283,14 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
-      
-      # # set up data grid for prediction
-      # data_grid <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-      #   branch(adjust_for_approach_bias,
-      #     "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-      #     "approach_as_covariate" ~ mutate(approach_value = 0)
-      #   )
-      # 
-      # # extract predicted JNDs from model
-      # prediction <- predict(m, se.fit = TRUE, newdata = data_grid, data = df, type = "response")
-      # 
-      # output <- data_grid %>%
-      #   mutate(
-      #     # unpack fitted predictions and standard errors to dataframe
-      #     fit = prediction$fit,
-      #     se.fit = prediction$se.fit,
-      #     # simulate draws from a t distribution to transform into a sampling distribution of JNDs
-      #     .draw = list(1:5000),
-      #     t = map(df, ~rt(5000, .))
-      #   ) %>%
-      #   unnest(cols = c(".draw", "t")) %>%
-      #   # scale and shift t to get a sampling distribution of average JNDs for each condition in the data grid
-      #   mutate(jnd = t * se.fit + fit) %>%
-      #   group_by(r, visandsign) %>%
-      #   median_qi(jnd)
-      
-      # # extract predicted JNDs from model
-      # output <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-      #   branch(adjust_for_approach_bias,
-      #     "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-      #     "approach_as_covariate" ~ mutate(approach_value = 0)
-      #   ) %>%
-      #   cbind(prediction = predict(m, se.fit = TRUE, newdata = ., data = df, type = "response")) %>%
-      #   mutate(
-      #     # unpack fitted predictions and standard errors to dataframe
-      #     fit = prediction$fit,
-      #     se.fit = prediction$se.fit,
-      #     # simulate draws from a t distribution to transform into a sampling distribution of JNDs
-      #     .draw = list(1:5000),
-      #     t = map(df, ~rt(5000, .))
-      #   ) %>%
-      #   unnest(cols = c(".draw", "t")) %>%
-      #   # scale and shift t to get a sampling distribution of average JNDs for each condition in the data grid
-      #   mutate(jnd = t * se.fit + fit) %>%
-      #   group_by(r, visandsign) %>%
-      #   median_qi(jnd)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
 
       return(output)
     },
@@ -418,13 +301,14 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
 
       return(output)
     },
@@ -435,17 +319,19 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
 
       return(output)
     }#,
-    # "hierarchical" ~ function(m, df) {
+    # TODO: revise postprocessing for hierarchical path to use emmeans()
+    # "hierarchical" ~ function(m, df) { 
     #   # extract predictions for probability of answering correctly
     #   predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
     #     branch(adjust_for_approach_bias,
@@ -499,15 +385,62 @@ output <- postprocess(m)
 ```
 
 ```{r}
+# AMK: "crossed wires" issue causes errors in universes 11 and 12 (see the errors below on execution)
+  # error in universe 11
+  # Error in eval(predvars, data, env): object 'approach_value' not found
+  # error in universe 12
+  # Error in eval(predvars, data, env): object 'approach_value' not found
 execute_multiverse(M)
 ```
+
+## Debugging
 
 ```{r}
 M_expand <- multiverse::expand(M)
 ```
 
+conditions
+
 ```{r}
-M_expand$.code[[4]]
+# AMK: re %when% conditions; the conditions in the modeling block should omit 2 of 24 universes, but we can see here that there are 16 (8 have been omitted, why?)
+M_expand %>% summarise(n())
+```
+
+"crossed wires"
+
+```{r}
+# AMK: re "crossed wires"; we cans see that universes 11 and 12 should adjust_for_approach_bias via the approach_as_covariate path...
+M_expand %>% filter(.universe %in% 11:12)
+```
+
+```{r}
+# AMK: yet we cans see in universe 11 that the generated .code block is taking the opposite path, adjusted_correlation. note that approach_value is not defined, but r is mutated...
+M_expand$.code[[11]]$`adjust-approach`
+```
+
+```{r}
+# AMK: and universe 12 is doing the same. "crossed wires" is still and issue
+M_expand$.code[[12]]$`adjust-approach`
+```
+
+extra * in model formula
+
+```{r}
+# AMK: re unexpected * in the model formula; taking universe 5 for example, we can see that the modeling block looks well formed...
+M_expand$.code[[5]]$modeling
+```
+
+```{r}
+# AMK: but when we run the model, the formula is all messed up. This doesn't happen in every universe. There are also fit issues related to the random effect variance getting stuck at zero. Could this be related to the model spec getting messed up? I'm thinking of omitting models with random effects from the universe since most of them seem to have convergence issues with only 4 JND estimates per participant.
+m <- lmer(jnd ~ r * visandsign * NULL + (1 | participant), data = df)
+summary(m)
+```
+
+don't worry about this, Abhraneel
+
+```{r}
+# TODO: figure out why models don't converge when log_transform, approach_as_covariate, and random_effects==yes (e.g., in universe 15)
+M_expand$.code[[15]]
 ```
 
 ```{r}
@@ -515,7 +448,7 @@ M_expand$.code[[4]]
 ```
 
 ```{r}
-saveRDS(M, file = "ranking-correlation.rds")
+# saveRDS(M, file = "ranking-correlation.rds")
 # readRDS("ranking-correlation.rds")
 ```
 
@@ -523,6 +456,6 @@ saveRDS(M, file = "ranking-correlation.rds")
 
 ```{r}
 # define marginal CIs before we get to this point so that we don't have to extract full dataframes
-results <- extract_variables(M, output)
+# results <- extract_variables(M, output)
 ```
 
