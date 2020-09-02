@@ -66,7 +66,8 @@ df <- vis_correlation_all_judgments %>%
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
  - Derive JNDs by assuming staircase convergence, taking the average stimulus intensity over the last 24 trials as in Harrison et al.'s original analysis.
- - Fit curves to all the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
+ - Fit logistic regressions to the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
+ - Fit scaled and shifted cumulative Gaussian psychometric functions (as in [Kale et al. 2018](http://users.eecs.northwestern.edu/~jhullman/hops_jobs_pfs.pdf) to the data from each individual staircase, and derive JNDs as the level of stimulus intensity where the curve predicts 75% accuracy.
  - Fit a big hierarchical model to all judgments and derive JNDs from the joint model fit.
 
 Two of these strategies require a function to estimate JNDs from the slope and intercept of logistic regression.
@@ -94,6 +95,7 @@ derive_jnd <- branch(operationalize_jnd,
   "logistic_curve_fitting" ~ function(df) {
     df <- df %>%
       group_by(participant, r, approach, visandsign) %>%
+      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         dr = list(dr),
         correct = list(as.integer(correct)),
@@ -109,8 +111,8 @@ derive_jnd <- branch(operationalize_jnd,
         jnd = exp(jnd_from_logistic(b_0, b_1))
       ) %>%
       unnest(cols = c(dr, correct)) %>%
-      ungroup() %>%
-      dplyr::select(-index)
+      ungroup() #%>%
+      # dplyr::select(-index)
     
     return(df)
   },
@@ -118,6 +120,7 @@ derive_jnd <- branch(operationalize_jnd,
     # prepare data for psychometeric function fitting
     psy_data <- df %>%
       group_by(participant, r, approach, visandsign, dr) %>%
+      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         # number correct and number of trials at each level of stimulus intensity for each staircase
         # dr = unique(dr),
@@ -136,11 +139,12 @@ derive_jnd <- branch(operationalize_jnd,
       full_join(df, by = c("participant", "r", "approach", "visandsign")) %>%
       ungroup() %>%
       # this approach sometimes fails generating NA values for jnd that we need to drop
-      drop_na() %>%
-      dplyr::select(-index)
+      drop_na() #%>%
+      # dplyr::select(-index)
     
     return(df)
   }#,
+  # TODO: add hierarchical path
   # "hierarchical" ~ { # derive jnds after model fitting
   #   df
   # } 
@@ -267,8 +271,9 @@ m <- branch(random_effects,
       "log_transform" ~ # log-linear model
         glmer(jnd ~ r * visandsign
             * branch(adjust_for_approach_bias, # conditions avoid fit issues in specific universes
-                "adjusted_correlation" ~ NULL, #%when% (operationalize_jnd != "staircase_convergence")
-                "approach_as_covariate" ~ approach_value #%when% (operationalize_jnd == "guess_lapse_curve_fitting")
+                "adjusted_correlation" ~ NULL,
+                # AMK: condition on next line should cut 2 universes, but cuts 8. what is happening?
+                "approach_as_covariate" %when% (operationalize_jnd == "guess_lapse_curve_fitting") ~ approach_value 
               )
             + (1 | participant),
           data = df,
@@ -320,6 +325,7 @@ m <- branch(random_effects,
     #     "log_transform" ~ LOGNO # log-linear models
     #   )
     # )#,
+  # TODO: add hierarchical path
   # "hierarchical" %when% operationalize_jnd == "hierarchical" ~ # logistic regression and derive JNDs after 
     # glmer(correct ~ r * log(dr) * visandsign
     #     * branch(adjust_for_approach_bias,
@@ -355,13 +361,14 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
       
       # # set up data grid for prediction
       # data_grid <- expand.grid(r = unique(df$r), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
@@ -418,13 +425,14 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
 
       return(output)
     },
@@ -435,17 +443,19 @@ postprocess <- branch(operationalize_jnd,
           cov.keep = c("r"), 
           type = "response"
         ) %>% 
-        summary() %>% # to dataframe
-        rename(
-          jnd = response,
-          lowerCI = asymp.LCL,
-          upperCI = asymp.UCL
-        ) %>%
-        dplyr::select(-df)
+        summary() #%>% # to dataframe
+        # TODO: renaming depends on modeling function
+        # rename(
+        #   jnd = response,
+        #   lowerCI = asymp.LCL,
+        #   upperCI = asymp.UCL
+        # ) %>%
+        # dplyr::select(-df)
 
       return(output)
     }#,
-    # "hierarchical" ~ function(m, df) {
+    # TODO: revise postprocessing for hierarchical path to use emmeans()
+    # "hierarchical" ~ function(m, df) { 
     #   # extract predictions for probability of answering correctly
     #   predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
     #     branch(adjust_for_approach_bias,
@@ -499,15 +509,42 @@ output <- postprocess(m)
 ```
 
 ```{r}
+# AMK: "crossed wires" issue causes errors in universes 11 and 12 (see the errors below on execution)
+  # error in universe 11
+  # Error in eval(predvars, data, env): object 'approach_value' not found
+  # error in universe 12
+  # Error in eval(predvars, data, env): object 'approach_value' not found
 execute_multiverse(M)
 ```
+
+## Debugging
 
 ```{r}
 M_expand <- multiverse::expand(M)
 ```
 
 ```{r}
-M_expand$.code[[4]]
+# AMK: re %when% conditions; the conditions in the modeling block should omit 2 of 24 universes, but we can see here that there are 16 (8 have been omitted, why?)
+M_expand %>% summarise(n())
+```
+
+```{r}
+# AMK: re "crossed wires"; we cans see that universes 11 and 12 should adjust_for_approach_bias via the approach_as_covariate path...
+M_expand %>% filter(.universe %in% 11:12)
+```
+
+```{r}
+# AMK: yet we cans see in universe 11 that the generated .code block is taking the opposite path, adjusted_correlation. note that approach_value is not defined, but r is mutated...
+M_expand$.code[[11]]$`adjust-approach`
+```
+
+```{r}
+# AMK: and universe 12 is doing the same. "crossed wires" is still and issue
+M_expand$.code[[12]]$`adjust-approach`
+```
+
+```{r}
+M_expand$.code[[11]]
 ```
 
 ```{r}
