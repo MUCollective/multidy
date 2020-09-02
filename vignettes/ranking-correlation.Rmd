@@ -58,9 +58,9 @@ df <- vis_correlation_all_judgments %>%
     participant = as.factor(participant)
   ) %>%
   # remove pre-computed JNDs; we will calculate our own JNDs
-  dplyr::select(-jnd) %>% 
+  dplyr::select(-jnd) #%>% 
   # select handful of participants for debugging
-  filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf")) 
+  # filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf")) 
 ```
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
@@ -94,7 +94,6 @@ derive_jnd <- branch(operationalize_jnd,
   "logistic_curve_fitting" ~ function(df) {
     df <- df %>%
       group_by(participant, r, approach, visandsign) %>%
-      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         dr = list(dr),
         correct = list(as.integer(correct)),
@@ -118,7 +117,6 @@ derive_jnd <- branch(operationalize_jnd,
     # prepare data for psychometeric function fitting
     psy_data <- df %>%
       group_by(participant, r, approach, visandsign, dr) %>%
-      # TODO: fix summarise bug/warning. wtf is going on with this?
       summarise(
         # number correct and number of trials at each level of stimulus intensity for each staircase
         k = sum(as.integer(correct)),
@@ -284,13 +282,21 @@ postprocess <- branch(operationalize_jnd,
           type = "response"
         ) %>% 
         summary() #%>% # to dataframe
-        # TODO: renaming depends on modeling function
-        # rename(
-        #   jnd = response,
-        #   lowerCI = asymp.LCL,
-        #   upperCI = asymp.UCL
-        # ) %>%
-        # dplyr::select(-df)
+        # TODO: debug renaming conditioned on modeling function
+        rename(
+          jnd = branch(rename_output_mean,
+            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
+            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
+          ),
+          lowerCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
+          ),
+          upperCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
+          )
+        )
 
       return(output)
     },
@@ -302,13 +308,21 @@ postprocess <- branch(operationalize_jnd,
           type = "response"
         ) %>% 
         summary() #%>% # to dataframe
-        # TODO: renaming depends on modeling function
-        # rename(
-        #   jnd = response,
-        #   lowerCI = asymp.LCL,
-        #   upperCI = asymp.UCL
-        # ) %>%
-        # dplyr::select(-df)
+        # TODO: debug renaming conditioned on modeling function
+        rename(
+          jnd = branch(rename_output_mean,
+            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
+            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
+          ),
+          lowerCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
+          ),
+          upperCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
+          )
+        )
 
       return(output)
     },
@@ -320,13 +334,21 @@ postprocess <- branch(operationalize_jnd,
           type = "response"
         ) %>% 
         summary() #%>% # to dataframe
-        # TODO: renaming depends on modeling function
-        # rename(
-        #   jnd = response,
-        #   lowerCI = asymp.LCL,
-        #   upperCI = asymp.UCL
-        # ) %>%
-        # dplyr::select(-df)
+        # TODO: debug renaming conditioned on modeling function
+        rename(
+          jnd = branch(rename_output_mean,
+            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
+            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
+          ),
+          lowerCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
+          ),
+          upperCI = branch(rename_output_CI,
+            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
+            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
+          )
+        )
 
       return(output)
     }#,
