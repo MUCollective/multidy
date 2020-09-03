@@ -58,9 +58,9 @@ df <- vis_correlation_all_judgments %>%
     participant = as.factor(participant)
   ) %>%
   # remove pre-computed JNDs; we will calculate our own JNDs
-  dplyr::select(-jnd) #%>% 
+  dplyr::select(-jnd) %>% 
   # select handful of participants for debugging
-  # filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf")) 
+  filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf"))
 ```
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
@@ -210,62 +210,31 @@ df <- adjustment(df)
 
 Now, we are ready to model our data. Multiple decisions impact the implementation here, so we use multiple branches to represent the impacts of *decisions we have already made* at the modeling stage. The only new decision we introduce at this point is whether or not to include random intercepts per participant in our model specification.
 
+Using approach as a covariate in models with random effects leads to identifiability issues, so we omit these paths
+
 ```{multiverse, modeling, inside = M}
-m <- branch(random_effects,
-  "yes" %when% (operationalize_jnd != "hierarchical") ~
-    branch(handle_non_normality,
-      "exclude" ~ # linear model
-        lmer(jnd ~ r * visandsign
-            * branch(adjust_for_approach_bias,
-                "adjusted_correlation" ~ NULL,
-                "approach_as_covariate" ~ approach_value
-              )
-            + (1 | participant),
-          data = df
-        ),
-      "log_transform" ~ # log-linear model
-        glmer(jnd ~ r * visandsign
-            * branch(adjust_for_approach_bias, # conditions avoid fit issues in specific universes
-                "adjusted_correlation" ~ NULL,
-                # AMK: condition on next line should cut 2 universes, but cuts 8. what is happening?
-                "approach_as_covariate" %when% (operationalize_jnd == "guess_lapse_curve_fitting") ~ approach_value
-              )
-            + (1 | participant),
-          data = df,
-          family = gaussian(link = "log")
-        )
-    ),
-  "no" %when% (operationalize_jnd != "hierarchical") ~ 
-    branch(handle_non_normality,
-      "exclude" ~ # linear model
-        lm(jnd ~ r * visandsign
-            * branch(adjust_for_approach_bias,
-                "adjusted_correlation" ~ NULL,
-                "approach_as_covariate" ~ approach_value
-              ),
-          data = df
-        ),
-      "log_transform" ~ # log-linear model
-        glm(jnd ~ r * visandsign
-            * branch(adjust_for_approach_bias,
-                "adjusted_correlation" ~ NULL,
-                "approach_as_covariate" ~ approach_value
-              ),
-          data = df,
-          family = gaussian(link = "log")
-        )
-    )#,
-  # TODO: add hierarchical path
-  # "hierarchical" %when% (operationalize_jnd == "hierarchical") ~ # logistic regression and derive JNDs after 
-    # glmer(correct ~ r * log(dr) * visandsign
-    #     * branch(adjust_for_approach_bias,
-    #         "adjusted_correlation" ~ NULL,
-    #         "approach_as_covariate" ~ approach_value
-    #       )
-    #     + (1 | participant),
-    #   data = df,
-    #   family = binomial
-    # )
+m <- branch(model,
+  # linear models
+  "lm" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "exclude" && adjust_for_approach_bias == "adjusted_correlation") ~
+    lm(jnd ~ r * visandsign, data = df),
+  "lm_approach" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "exclude" && adjust_for_approach_bias == "approach_as_covariate") ~
+    lm(jnd ~ r * visandsign * approach_value, data = df),
+  "lmer" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "exclude" && adjust_for_approach_bias == "adjusted_correlation") ~ 
+    lmer(jnd ~ r * visandsign + (1 | participant), data = df),
+  
+  # log-linear models
+  "glm" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "log_transform" && adjust_for_approach_bias == "adjusted_correlation") ~
+    glm(jnd ~ r * visandsign, data = df, family = gaussian(link = "log")),
+  "glm_approach" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "log_transform" && adjust_for_approach_bias == "approach_as_covariate") ~
+    glm(jnd ~ r * visandsign * approach_value, data = df, family = gaussian(link = "log")),
+  "glmer" %when% (operationalize_jnd != "hierarchical" && handle_non_normality == "log_transform" && adjust_for_approach_bias == "adjusted_correlation") ~
+    glmer(jnd ~ r * visandsign + (1 | participant), data = df, family = gaussian(link = "log"))#,
+  # TODO: add hierarchical binomial paths
+  # # hierarchical logistic regression and derive JNDs after
+  # "glmer_binomial" %when% (operationalize_jnd == "hierarchical" && adjust_for_approach_bias == "adjusted_correlation") ~
+  #   glmer(correct ~ r * log(dr) * visandsign + (1 | participant), data = df, family = binomial),
+  # "glmer_binomial_approach" %when% (operationalize_jnd == "hierarchical" && adjust_for_approach_bias == "approach_as_covariate") ~
+  #   glmer(correct ~ r * log(dr) * visandsign * approach_value + (1 | participant), data = df, family = binomial)
 )
 ```
 
@@ -273,134 +242,140 @@ Now we postprocess our models. The way we do this depends on *decisions we've al
 
 ```{multiverse, postprocessing, inside = M}
 # AMK: why is there an unexpected * in the model formula when I call emmeans?
-postprocess <- branch(operationalize_jnd,
-    "staircase_convergence" ~ function(m) {
-      # extract marginal estimate for JNDs in each level of visandsign
-      output <- m %>% 
-        emmeans(~ visandsign, 
-          cov.keep = c("r"), 
-          type = "response"
-        ) %>% 
-        summary() #%>% # to dataframe
-        # TODO: debug renaming conditioned on modeling function
-        rename(
-          jnd = branch(rename_output_mean,
-            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
-            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
-          ),
-          lowerCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
-          ),
-          upperCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
-          )
-        )
+postprocess <- branch(extract_estimates,
+  "extract_jnds_lm" %when% (model == "lm") ~ function(m) {
+    # extract marginal estimate for JNDs in each level of visandsign
+    output <- m %>% 
+      emmeans(~ visandsign, 
+        cov.keep = c("r"), 
+        type = "response"
+      ) %>% 
+      summary() %>% # to dataframe
+      rename(
+        jnd = emmean,
+        lowerCI = lower.CL,
+        upperCI = upper.CL
+      )
 
-      return(output)
-    },
-    "logistic_curve_fitting" ~ function(m) {
-      # extract marginal estimate for JNDs in each level of visandsign
-      output <- m %>% 
-        emmeans(~ visandsign, 
-          cov.keep = c("r"), 
-          type = "response"
-        ) %>% 
-        summary() #%>% # to dataframe
-        # TODO: debug renaming conditioned on modeling function
-        rename(
-          jnd = branch(rename_output_mean,
-            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
-            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
-          ),
-          lowerCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
-          ),
-          upperCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
-          )
-        )
+    return(output)
+  },
+  "extract_jnds_lm_approach" %when% (model == "lm_approach") ~ function(m) {
+    # extract marginal estimate for JNDs in each level of visandsign
+    output <- m %>% 
+      emmeans(~ visandsign, 
+        cov.keep = c("r"), 
+        at = list(approach_value = c(0)),
+        type = "response"
+      ) %>% 
+      summary() %>% # to dataframe
+      rename(
+        jnd = emmean,
+        lowerCI = lower.CL,
+        upperCI = upper.CL
+      )
 
-      return(output)
-    },
-    "guess_lapse_curve_fitting" ~ function(m) {
-      # extract marginal estimate for JNDs in each level of visandsign
-      output <- m %>% 
-        emmeans(~ visandsign, 
-          cov.keep = c("r"), 
-          type = "response"
-        ) %>% 
-        summary() #%>% # to dataframe
-        # TODO: debug renaming conditioned on modeling function
-        rename(
-          jnd = branch(rename_output_mean,
-            "linear" %when% (handle_non_normality == "exclude") ~ emmean,
-            "back_transform" %when% (handle_non_normality == "log_transform") ~ response
-          ),
-          lowerCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ lower.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.LCL
-          ),
-          upperCI = branch(rename_output_CI,
-            "linear_model" %when% (handle_non_normality == "exclude" & random_effects == "no") ~ upper.CL,
-            "other" %when% (handle_non_normality == "log_transform" | random_effects == "yes") ~ asymp.UCL
-          )
-        )
+    return(output)
+  },
+  "extract_jnds_lmer" %when% (model == "lmer") ~ function(m) {
+    # extract marginal estimate for JNDs in each level of visandsign
+    output <- m %>% 
+      emmeans(~ visandsign, 
+        cov.keep = c("r"), 
+        type = "response"
+      ) %>% 
+      summary() %>% # to dataframe
+      rename(
+        jnd = emmean,
+        lowerCI = asymp.LCL,
+        upperCI = asymp.UCL
+      )
 
-      return(output)
-    }#,
-    # TODO: revise postprocessing for hierarchical path to use emmeans()
-    # "hierarchical" ~ function(m, df) { 
-    #   # extract predictions for probability of answering correctly
-    #   predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
-    #     branch(adjust_for_approach_bias,
-    #       "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
-    #       "approach_as_covariate" ~ mutate(approach_value = 0)
-    #     ) %>%
-    #     cbind(prediction = predict(m, se.fit = TRUE, newdata = ., data = df, type = "response"))
-    #
-    #   # use predictions at stimulus intensities of 0 and 1 (exponentiated) to calculate slope and intercept
-    #   slope_df <- predictions %>%
-    #     group_by(r, dr, visandsign, participant) %>%
-    #     compare_levels(prediction, by = dr) %>%
-    #     rename(b_1 = prediction) %>%
-    #     dplyr::select(-dr)
-    #   intercept_df <- predictions %>%
-    #     filter(dr == exp(0)) %>%
-    #     rename(b_0 = prediction) %>%
-    #     dplyr::select(-dr)
-    #
-    #   output <- slope_df %>%
-    #     full_join(intercept_df, by = c("r", "visandsign", "participant")) %>%
-    #     mutate(
-    #       jnd = exp(jnd_from_logistic(b_0, b_1)) # finally define JNDs
-    #     ) %>%
-    #
-    #     # apply exclusion criteria to JNDs now that we've defined them in this branch:
-    #     # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
-    #     group_by(visandsign) %>%
-    #     mutate(p_chance_cutoff = mean(jnd > .45) > 0.2) %>%
-    #     group_by(visandsign, r, approach) %>%
-    #     mutate(
-    #       mad_cutoff = branch(handle_non_normality,
-    #         "exclude" ~ abs(jnd - median(jnd)) > 3 * mad(jnd), # exclude observations > 3 median-absolute deviations from the median within each group
-    #         "log_transform" ~ FALSE # don't exclude any data, log transform instead
-    #       )
-    #     ) %>%
-    #     ungroup() %>%
-    #     # aggregate exclusion criteria
-    #     mutate(exclude = p_chance_cutoff | mad_cutoff) %>%
-    #     filter(!exclude) %>%
-    #
-    #     # aggregate JND estimates to output format
-    #     group_by(r, visandsign) %>%
-    #     median_qi(jnd)
-    #
-    #   return(output)
-    # }
+    return(output)
+  },
+  "extract_jnds_glm.er" %when% (model == "glm" || model == "glmer") ~ function(m) {
+    # extract marginal estimate for JNDs in each level of visandsign
+    output <- m %>% 
+      emmeans(~ visandsign, 
+        cov.keep = c("r"), 
+        type = "response"
+      ) %>% 
+      summary() %>% # to dataframe
+      # TODO: debug renaming conditioned on modeling function
+      rename(
+        jnd = response,
+        lowerCI = asymp.LCL,
+        upperCI = asymp.UCL
+      )
+
+    return(output)
+  },
+  "extract_jnds_glm_approach" %when% (model == "glm_approach") ~ function(m) {
+    # extract marginal estimate for JNDs in each level of visandsign
+    output <- m %>% 
+      emmeans(~ visandsign, 
+        cov.keep = c("r"), 
+        at = list(approach_value = c(0)),
+        type = "response"
+      ) %>% 
+      summary() %>% # to dataframe
+      # TODO: debug renaming conditioned on modeling function
+      rename(
+        jnd = response,
+        lowerCI = asymp.LCL,
+        upperCI = asymp.UCL
+      )
+
+    return(output)
+  },
+  # TODO: revise postprocessing for hierarchical binomial path to use emmeans()
+  # "hierarchical" ~ function(m, df) { 
+  #   # extract predictions for probability of answering correctly
+  #   predictions <- expand.grid(r = unique(df$r), dr = exp(c(0, 1)), visandsign = levels(factor(df$visandsign)), participant = levels(factor(df$participant))) %>%
+  #     branch(adjust_for_approach_bias,
+  #       "adjusted_correlation" ~ (function(d) { return(d) }), # do nothing
+  #       "approach_as_covariate" ~ mutate(approach_value = 0)
+  #     ) %>%
+  #     cbind(prediction = predict(m, se.fit = TRUE, newdata = ., data = df, type = "response"))
+  #
+  #   # use predictions at stimulus intensities of 0 and 1 (exponentiated) to calculate slope and intercept
+  #   slope_df <- predictions %>%
+  #     group_by(r, dr, visandsign, participant) %>%
+  #     compare_levels(prediction, by = dr) %>%
+  #     rename(b_1 = prediction) %>%
+  #     dplyr::select(-dr)
+  #   intercept_df <- predictions %>%
+  #     filter(dr == exp(0)) %>%
+  #     rename(b_0 = prediction) %>%
+  #     dplyr::select(-dr)
+  #
+  #   output <- slope_df %>%
+  #     full_join(intercept_df, by = c("r", "visandsign", "participant")) %>%
+  #     mutate(
+  #       jnd = exp(jnd_from_logistic(b_0, b_1)) # finally define JNDs
+  #     ) %>%
+  #
+  #     # apply exclusion criteria to JNDs now that we've defined them in this branch:
+  #     # exclude visandsign with > 20% jnds worse than chance performance (> 0.45)
+  #     group_by(visandsign) %>%
+  #     mutate(p_chance_cutoff = mean(jnd > .45) > 0.2) %>%
+  #     group_by(visandsign, r, approach) %>%
+  #     mutate(
+  #       mad_cutoff = branch(handle_non_normality,
+  #         "exclude" ~ abs(jnd - median(jnd)) > 3 * mad(jnd), # exclude observations > 3 median-absolute deviations from the median within each group
+  #         "log_transform" ~ FALSE # don't exclude any data, log transform instead
+  #       )
+  #     ) %>%
+  #     ungroup() %>%
+  #     # aggregate exclusion criteria
+  #     mutate(exclude = p_chance_cutoff | mad_cutoff) %>%
+  #     filter(!exclude) %>%
+  #
+  #     # aggregate JND estimates to output format
+  #     group_by(r, visandsign) %>%
+  #     median_qi(jnd)
+  #
+  #   return(output)
+  # }
 )
 
 output <- postprocess(m)
@@ -458,11 +433,11 @@ m <- lmer(jnd ~ r * visandsign * NULL + (1 | participant), data = df)
 summary(m)
 ```
 
-don't worry about this, Abhraneel
+
 
 ```{r}
 # TODO: figure out why models don't converge when log_transform, approach_as_covariate, and random_effects==yes (e.g., in universe 15)
-M_expand$.code[[15]]
+M_expand$.code[[40]]
 ```
 
 ```{r}
