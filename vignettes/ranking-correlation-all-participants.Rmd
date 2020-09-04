@@ -58,9 +58,9 @@ df <- vis_correlation_all_judgments %>%
     participant = as.factor(participant)
   ) %>%
   # remove pre-computed JNDs; we will calculate our own JNDs
-  dplyr::select(-jnd) %>% 
+  dplyr::select(-jnd) #%>% 
   # select handful of participants for debugging
-  filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf"))
+  # filter(participant %in% c("hrqfen7i", "hs1tlxtw", "hskjvwol", "hsyws9iw", "hsi8loaf"))
 ```
 
 Next we operationalize just-noticeable differences (JNDs), the dependent variable in our analysis. This is a major decision point where we will multiplex across multiple common strategies.
