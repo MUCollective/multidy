@@ -1,0 +1,283 @@
+---
+title: "Multiverse Visualisation as Classification and Regression Trees"
+author: "Abhraneel Sarma"
+output: html_document
+---
+
+
+```{r, setup, message=FALSE, warning=FALSE}
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(broom)
+library(gganimate)
+library(cowplot)
+library(rpart)
+library(multiverse)
+```
+
+
+
+<script type="text/javascript" src="inst/commons/Tangle.js"></script>
+
+<!-- TangleKit (optional) -->
+<link rel="stylesheet" href="inst/commons/TangleKit/TangleKit.css" type="text/css">
+<script type="text/javascript" src="inst/commons/TangleKit/mootools.js"></script>
+<script type="text/javascript" src="inst/commons/TangleKit/sprintf.js"></script>
+<script type="text/javascript" src="inst/commons/TangleKit/BVTouchable.js"></script>
+<script type="text/javascript" src="inst/commons/TangleKit/TangleKit.js"></script>
+
+## Tangle setup
+
+```{js}
+function setUpTangle () {
+    var element = document.getElementById("example");
+
+    var tangle = new Tangle(element, {
+        initialize: function () {
+            this.universe = 1;
+        },
+        update: function () {
+            $('pre.multiverse').hide();
+            $(".multiverse.universe-" + this.universe).show();
+        }
+    });
+}
+
+window.onload = function() {
+    setUpTangle();
+}
+```
+
+
+## Multiverse implementation
+
+```{r init}
+M = multiverse()
+```
+
+
+```{r, data}
+data("durante")
+
+data.raw.study2 <- durante %>%
+  mutate(
+    Abortion = abs(7 - Abortion) + 1,
+    StemCell = abs(7 - StemCell) + 1,
+    Marijuana = abs(7 - Marijuana) + 1,
+    RichTax = abs(7 - RichTax) + 1,
+    StLiving = abs(7 - StLiving) + 1,
+    Profit = abs(7 - Profit) + 1,
+    FiscConsComp = FreeMarket + PrivSocialSec + RichTax + StLiving + Profit,
+    SocConsComp = Marriage + RestrictAbortion + Abortion + StemCell + Marijuana
+  )
+```
+
+A detailed description of this analysis can be found in [`A complete multiverse analysis`](complete-multiverse-analysis.html). We will use the results from this analysis to create the visualizations.
+
+```{r}
+M = multiverse()
+```
+
+
+```{multiverse default-m-1, inside = M}
+df <- data.raw.study2  %>%
+  mutate( ComputedCycleLength = StartDateofLastPeriod - StartDateofPeriodBeforeLast )  %>%
+  dplyr::filter( branch(cycle_length,
+      "cl_option1" ~ TRUE,
+      "cl_option2" ~ ComputedCycleLength > 25 & ComputedCycleLength < 35,
+      "cl_option3" ~ ReportedCycleLength > 25 & ReportedCycleLength < 35
+  ))
+```
+
+
+```{multiverse default-m-2, inside = M}
+df <- df %>%
+  dplyr::filter( branch(certainty,
+      "cer_option1" ~ TRUE,
+      "cer_option2" ~ Sure1 > 6 | Sure2 > 6
+  ))
+```
+
+
+```{multiverse default-m-3, inside = M}
+df <- df %>% 
+  mutate(NextMenstrualOnset = branch(menstrual_calculation,
+      "mc_option1" %when% (cycle_length != "cl_option3") ~ StartDateofLastPeriod + ComputedCycleLength,
+      "mc_option2" %when% (cycle_length != "cl_option2") ~ StartDateofLastPeriod + ReportedCycleLength,
+      "mc_option3" ~ StartDateNext)
+  ) %>%
+  mutate(
+    CycleDay = 28 - (NextMenstrualOnset - DateTesting),
+    CycleDay = ifelse(CycleDay > 1 & CycleDay < 28, CycleDay, ifelse(CycleDay < 1, 1, 28))
+  ) 
+```
+
+
+```{multiverse default-m-4, inside = M}
+df <- df %>%
+  mutate( Fertility = branch( fertile,
+      "fer_option1" ~ factor( ifelse(CycleDay >= 7 & CycleDay <= 14, "high", ifelse(CycleDay >= 17 & CycleDay <= 25, "low", NA)) ),
+      "fer_option2" ~ factor( ifelse(CycleDay >= 6 & CycleDay <= 14, "high", ifelse(CycleDay >= 17 & CycleDay <= 27, "low", NA)) ),
+      "fer_option3" ~ factor( ifelse(CycleDay >= 9 & CycleDay <= 17, "high", ifelse(CycleDay >= 18 & CycleDay <= 25, "low", NA)) ),
+      "fer_option4" ~ factor( ifelse(CycleDay >= 8 & CycleDay <= 14, "high", "low") ),
+      "fer_option5" ~ factor( ifelse(CycleDay >= 8 & CycleDay <= 17, "high", "low") )
+  ))
+```
+
+
+```{multiverse default-m-5, inside = M}
+df  <- df %>%
+  mutate(RelationshipStatus = branch(relationship_status,
+      "rs_option1" ~ factor(ifelse(Relationship==1 | Relationship==2, 'Single', 'Relationship')),
+      "rs_option2" ~ factor(ifelse(Relationship==1, 'Single', 'Relationship')),
+      "rs_option3" ~ factor(ifelse(Relationship==1, 'Single', ifelse(Relationship==3 | Relationship==4, 'Relationship', NA))) )
+  ) %>%
+  mutate( RelComp = round((Rel1 + Rel2 + Rel3)/3, 2))
+
+fit_RelComp <- lm( RelComp ~ Fertility * RelationshipStatus, data = df )
+
+summary_RelComp <- fit_RelComp %>% broom::tidy( conf.int = TRUE )
+```
+
+<p id="example">The above graph shows the result of universe #<span data-var="universe" class="TKAdjustableNumber" data-max="`r size(M)`"></span>. In this multiverse we are using as example Steegen et al's multiverse analysis.</p>
+
+
+```{r}
+execute_multiverse(M)
+
+df.multiverse_results <- expand(M) %>%
+  extract_variables(summary_RelComp) %>%
+  unnest( cols = c(summary_RelComp) )
+```
+
+## creating JSON of multiverse table 
+
+```{r}
+mverse_JSON <- expand(M) %>%
+  extract_variables(summary_RelComp) %>%
+  tidyr::unnest( cols = c(summary_RelComp) ) %>%
+  mutate(
+    .code = map(.code, ~ lapply(unname(expand(M)$.code[[1]]), function(x) {
+            y <- deparse(x)
+            y[2:(length(y)-1)]
+        }))
+  ) %>%
+  arrange(relationship_status, fertile, menstrual_calculation, certainty, cycle_length) %>%
+  select(-.results) # currently ommiting code because it is fucking up the JSON
+
+jsonlite::write_json(
+  x = mverse_JSON, 
+  path = "../my-svelte-project/static/data/multiverse_table.json", 
+  pretty = 4, 
+  auto_unbox = TRUE
+)
+
+cat( jsonlite::toJSON(head(mverse_JSON, 3), pretty = TRUE, auto_unbox = TRUE) )
+```
+
+
+## visualisations
+
+
+```{r}
+library(gridExtra)
+
+mydf <- tibble(a = c(1,2,3,4,5,4),
+               b = c(4,4,4,3,3,3))
+
+g <- tableGrob(mydf)
+grid::grid.draw(g)
+```
+
+## Regression trees
+
+
+Across the various multiverse specifications, how does the effect of the variable "Fertility" impact "Religiosity"
+
+```{r}
+m1 <- rpart(estimate ~ cycle_length + certainty + menstrual_calculation + fertile + relationship_status, data = filter(df.multiverse_results, term == "Fertilitylow"))
+
+par(xpd = NA) # otherwise on some devices the text is clipped
+plot(m1)
+text(m1, digits = 3)
+```
+
+```{r}
+tb <- mtcars %>%
+  group_by(cyl) %>%
+  summarize(wt = mean(wt), mpg = mean(mpg)) %>%
+  ungroup() %>%
+  mutate(wt = sprintf("%.2f", wt),
+  mpg = sprintf("%.1f", mpg))
+
+df <- tibble(x = 5.45, y = 34, tb = list(tb))
+
+ggplot(mtcars, aes(wt, mpg, colour = factor(cyl))) +
+  geom_point() +
+  geom_table(data = df, aes(x = x, y = y, label = tb))
+```
+
+
+```{r}
+grid.table(df.multiverse_results[,2:6])
+```
+
+
+```{r, fig.height = 9, fig.width = 4, eval = FALSE}
+df.multiverse_results %>%
+  filter(term == "Fertilitylow") %>%
+  ggplot() +
+  geom_pointintervalh(aes(x = estimate, y = .universe, xmin = conf.low, xmax = conf.high)) +
+  scale_y_reverse()
+```
+
+
+
+```{r}
+tree_df <- m1$frame %>%
+  tibble::rownames_to_column(var = "node") %>%
+  mutate(
+    node = as.numeric(node) - 1,
+    level = tree.depth(node + 1),
+    label = labels(m1, minlength = 0L),
+    parent = floor((node - 1) / 2)
+  )
+
+tree_df %>%
+  mutate(
+    yval_parent = map_dbl(parent, function(x) {
+      idx = yval[which(node == x)]
+      ifelse(length(idx) == 0, NA, idx)
+    })
+  ) %>%
+  ggplot() +
+  geom_segment(aes(x = yval, y = level, xend = yval_parent, yend = ifelse(level == 0, level, level - 1))) +
+  geom_point(aes(x = yval, y = level), shape = 21, fill = "#ffffff", size = 5, stroke = 1.5) + 
+  scale_y_reverse() +
+  theme_bw()
+```
+
+```{r}
+print(m1)
+```
+
+
+
+```{r}
+m1$frame
+
+tree.depth(as.numeric(row.names(m1$frame)))
+
+labels(m1$frame)
+```
+
+
+
+```{r}
+print(m1, digits = 2)
+```
+
+
